@@ -1,0 +1,9 @@
+.env
+CLAUDE.md
+downloads/
+runs/
+models/
+__pycache__/
+.ipynb_checkpoints/
+*.tmp
+*.part
