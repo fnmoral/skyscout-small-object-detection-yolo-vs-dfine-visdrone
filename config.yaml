@@ -1,0 +1,119 @@
+# SkyScout settings and hyperparameters. Change values here, not in skyscout.py.
+
+seed: 42
+
+paths:
+  # Recommended: keep the extracted dataset on the Colab local disk, reading thousands of images from Drive is slow
+  colab_fast_data_dir: /content/data
+
+dataset:
+  base_url: https://github.com/ultralytics/assets/releases/download/v0.0.0
+  splits:
+    train: VisDrone2019-DET-train
+    val: VisDrone2019-DET-val
+    test: VisDrone2019-DET-test-dev
+  names: [pedestrian, people, bicycle, car, van, truck, tricycle, awning-tricycle, bus, motor]
+  drop_categories: [0, 11]   # 0 = ignored regions, 11 = others
+
+# Each machine is detected automatically. Set SKYSCOUT_PROFILE=colab|server|local to force one.
+# Recommended: if you get an out-of-memory error, lower the batch for that input size.
+profiles:
+  colab:
+    yolo_batch: {640: 16, 1024: 6}
+    dfine_batch: {640: 8, 1024: 2}
+    workers: 2
+  server:
+    yolo_batch: {640: 16, 1024: 8}
+    dfine_batch: {640: 8, 1024: 4}
+    workers: 8
+  local:
+    yolo_batch: {640: 8, 1024: 2}
+    dfine_batch: {640: 2, 1024: 1}
+    workers: 4
+
+# Ultralytics training arguments (passed straight to model.train)
+yolo:
+  epochs: 100
+  patience: 30
+  optimizer: SGD
+  lr0: 0.01
+  lrf: 0.01
+  momentum: 0.937
+  weight_decay: 0.0005
+  warmup_epochs: 3
+  cos_lr: false
+  close_mosaic: 10
+  amp: true
+  cache: false
+  plots: true
+
+# D-FINE (KerasHub, TensorFlow backend)
+dfine:
+  preset: dfine_small_obj2coco
+  epochs: 30
+  lr: 0.0002
+  min_lr_ratio: 0.05
+  warmup_epochs: 1
+  weight_decay: 0.0001
+  clipnorm: 0.1
+  ema: true
+  ema_momentum: 0.9999
+  llrd_decay: 0.8       # lr multiplier per backbone group, earliest layers get the smallest lr
+  llrd_groups: 5
+  max_boxes: 300        # D-FINE matches at most one object per query
+  min_box_px: 1         # drop boxes smaller than this after resizing
+  hflip: 0.5
+  val_images: 300       # images used for val loss each epoch
+  jit_compile: false
+
+# Order matters: the three D-FINE setups must finish before any 'best' run.
+# setup: frozen = train only encoder and decoder, full = train everything, llrd = full with layer-wise lr decay
+# setup: best = whichever of dfine_setup_compare has the highest val mAP50-95
+# run_on limits where a run starts, the others print a recommendation instead
+experiments:
+  yolo11s_640:      {family: yolo, weights: yolo11s.pt, imgsz: 640}
+  yolo26s_640:      {family: yolo, weights: yolo26s.pt, imgsz: 640}
+  dfine_frozen_640: {family: dfine, setup: frozen, imgsz: 640}
+  dfine_full_640:   {family: dfine, setup: full, imgsz: 640}
+  dfine_llrd_640:   {family: dfine, setup: llrd, imgsz: 640}
+  dfine_best_long_640: {family: dfine, setup: best, init_from: best, imgsz: 640, epochs: 40, overrides: {lr: 0.0001}}
+  dfine_best_25:    {family: dfine, setup: best, imgsz: 640, fraction: 0.25}
+  dfine_best_50:    {family: dfine, setup: best, imgsz: 640, fraction: 0.5}
+  yolo11s_1024:     {family: yolo, weights: yolo11s.pt, imgsz: 1024, run_on: [server]}
+  yolo26s_1024:     {family: yolo, weights: yolo26s.pt, imgsz: 1024, run_on: [server]}
+  dfine_best_1024:  {family: dfine, setup: best, imgsz: 1024, run_on: [server]}
+
+dfine_setup_compare: [dfine_frozen_640, dfine_full_640, dfine_llrd_640]
+
+evaluation:
+  splits: [val, test]
+  report_split: test
+  select_split: val
+  conf: 0.001
+  max_det: 300
+  pr_iou: 0.5
+  cm_conf: 0.25
+  cm_iou: 0.45
+  warmup: 10            # first images skipped in latency numbers
+  sample_images: 3
+  limit: null           # set a number for a quick test run
+
+# SAHI tiled inference: overlapping tiles, detect on each, merge with NMS
+sahi:
+  experiments: [yolo11s_640, yolo26s_640, dfine_best_long_640]
+  tile: 640
+  overlap: 0.25
+  include_full_image: true
+  merge_iou: 0.6
+  batch: 4
+
+# 'best' = the best D-FINE setup at 30 epochs (picked on val mAP50-95)
+report:
+  data_efficiency: {25: dfine_best_25, 50: dfine_best_50, 100: best}
+  input_size_pairs:
+    - [yolo11s_640, yolo11s_1024]
+    - [yolo26s_640, yolo26s_1024]
+    - [best, dfine_best_1024]
+
+demo:
+  conf: 0.3

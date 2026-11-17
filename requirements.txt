@@ -1,0 +1,11 @@
+# Recommended: Python 3.11 or 3.12
+tensorflow>=2.18
+keras>=3.15
+keras-hub>=0.33
+ultralytics>=8.4.0
+pycocotools
+opencv-python
+matplotlib
+pandas
+pyyaml
+gradio
