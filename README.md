@@ -88,6 +88,7 @@ flowchart LR
 | F1 | Balance of precision and recall |
 | Latency | Milliseconds per image on the same GPU (NMS time shown separately for YOLO11) |
 | Parameters / FLOPs | Model size and amount of math per image |
+| Train time | Hours of training, added up over every session (and which GPU did it) |
 
 Every model goes through the same evaluation code on the same split. Each model gets a results card like this one in `results/<model>/test/report.md`, plus a per-class table and a confusion matrix:
 
@@ -101,7 +102,7 @@ Every model goes through the same evaluation code on the same split. Each model 
 | Parameters | ... |
 | FLOPs | ... |
 
-The final comparison table and plots (accuracy vs speed, setups, input size, SAHI, data efficiency, sample predictions) are in `results/comparison.md`.
+Every report also says how long training and evaluation took. The final comparison table and plots (accuracy vs speed, setups, input size, SAHI, data efficiency, sample predictions) are in `results/comparison.md`.
 
 #### Files
 
@@ -132,8 +133,10 @@ flowchart TD
 Recommended: set `SKYSCOUT_PROFILE=colab`, `server` or `local` to override the guess.
 
 **Google Colab**
-1. Upload this folder to Google Drive as `MyDrive/SkyScout`.
-2. Open `SkyScout.ipynb` in Colab, pick a GPU runtime, run the cells in order.
+1. Open `SkyScout.ipynb` in Colab and pick a GPU runtime.
+2. Run the cells in order. The first cell mounts Google Drive and clones this repo into `MyDrive/SkyScout` if it is not there yet.
+
+Recommended: if the repo is private, upload the project folder to Google Drive as `MyDrive/SkyScout` instead.
 
 **School server or own PC**
 ```bash
@@ -143,9 +146,27 @@ python skyscout.py all             # run everything this machine is allowed to r
 python skyscout.py run yolo11s_1024
 python skyscout.py time dfine_full_640
 python skyscout.py eval yolo26s_640 --split test --sahi
+python skyscout.py latency         # time every saved model again on this machine's GPU
 python skyscout.py report
 python skyscout.py demo
 ```
+`all` starts each experiment in its own Python process, so TensorFlow and PyTorch never fight over GPU memory, and one failed run does not stop the rest.
+
+Recommended: if the server has more than one GPU, pick a free one with `CUDA_VISIBLE_DEVICES=1 python skyscout.py all`.
+
+**Own Windows PC**
+
+TensorFlow cannot use the GPU on plain Windows, so D-FINE is trained inside WSL2 (Ubuntu), which the code treats as the `local` profile. This profile uses shorter training (YOLO 50 epochs, D-FINE 6 epochs per setup) so everything fits on one laptop GPU in about a day, and it takes cooling breaks:
+
+```mermaid
+flowchart LR
+    E[Train one epoch] --> S[Save checkpoint]
+    S --> C{Trained 60 min<br/>or GPU too hot?}
+    C -- no --> E
+    C -- yes --> B[Pause until the GPU<br/>is under 60 C, at least 10 min] --> E
+```
+
+Breaks are not counted in the training time. Change or remove them with `cooldown` under `profiles: local:` in `config.yaml`.
 Recommended: on the server, start long jobs with `nohup python skyscout.py all > results/server_run.txt 2>&1 &` so they keep going after you log out.
 
 #### Interruptions and moving between machines
@@ -154,7 +175,8 @@ Nothing is lost when Colab disconnects or you switch machines:
 
 - YOLO saves `last.pt` every epoch and continues from it. The saved paths are rewritten so it also resumes on a different machine.
 - D-FINE saves the full training state (weights, optimizer, epoch) every epoch and continues from it.
-- Each step (train, evaluate, SAHI) writes a small file in `results/progress/`. Finished steps are skipped.
+- Evaluation saves its detections every 200 images and continues from there.
+- Each step (train, evaluate, SAHI) writes a small file in `results/progress/` with its status, the current epoch and the time spent so far. Finished steps are skipped.
 - Downloads are checked first, so nothing is downloaded twice.
 - `results/STATUS.md` shows what is done on which machine.
 
@@ -162,7 +184,22 @@ Recommended: when you move to another machine, copy the `runs/`, `models/` and `
 
 #### Demo
 
-`python skyscout.py demo` (or the last notebook cell) opens a small web app: upload a drone photo, pick a model, and get the boxes plus a count for each class. Turn on tiled inference to find even smaller objects.
+`python skyscout.py demo` (or the last notebook cell) opens a small web app for trying the models out. The scores were already measured in the evaluation step, the app shows them next to the chosen model.
+
+```mermaid
+flowchart LR
+    M[Pick a model] --> I[Image tab<br/>upload or pick a test photo]
+    M --> V[Video tab<br/>upload or pick a sample clip]
+    I --> R1[Boxes + count per class<br/>+ average confidence + time]
+    V --> R2[Video with boxes + objects per frame<br/>+ chart over time + FPS]
+```
+
+- **Image:** boxes drawn in a color per class, a table with the count and average confidence per class, and how long it took.
+- **Video:** the video comes back with boxes, plus the average and highest count per class and a line chart of objects over time. Counts are per frame (no tracking), so a car seen in 10 frames counts 10 times.
+- A short sample clip is built from one VisDrone test-dev sequence the first time. Put any other `.mp4` in `downloads/samples/` and it shows up as an example too.
+- Turn on tiled inference (SAHI) to find even smaller objects, at the cost of speed.
+
+Recommended: on the school server, open the demo through an SSH tunnel (`ssh -L 7860:localhost:7860 ...`) and go to `http://localhost:7860`.
 
 #### A note on D-FINE in KerasHub
 

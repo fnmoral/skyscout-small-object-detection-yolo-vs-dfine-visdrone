@@ -20,11 +20,15 @@ os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 import argparse
 import contextlib
 import csv
+import gc
 import io
 import json
+import math
+import pickle
 import platform
 import random
 import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -64,7 +68,10 @@ def detect_profile():
         return forced
     if 'google.colab' in sys.modules or 'COLAB_RELEASE_TAG' in os.environ:
         return 'colab'
-    return 'server' if platform.system() == 'Linux' else 'local'
+    # WSL reports Linux too, but it is the local PC
+    if platform.system() == 'Linux' and 'microsoft' not in platform.release().lower():
+        return 'server'
+    return 'local'
 
 
 CFG = load_config()
@@ -160,19 +167,41 @@ def torch_device():
     return 'mps' if mps is not None and mps.is_available() else 'cpu'
 
 
+_GPU = []
+
+
 def gpu_name():
+    '''GPU model, read from nvidia-smi so no framework has to start CUDA just to ask.'''
+    if _GPU:
+        return _GPU[0]
+    name = 'cpu'
     try:
-        import torch
+        out = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'], capture_output=True, text=True, timeout=20)
+        lines = [x.strip() for x in out.stdout.splitlines() if x.strip()]
+        visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')[0].strip()
+        if lines:
+            name = lines[int(visible)] if visible.isdigit() and int(visible) < len(lines) else lines[0]
+    except (OSError, subprocess.SubprocessError):
+        if 'torch' in sys.modules and sys.modules['torch'].cuda.is_available():
+            name = sys.modules['torch'].cuda.get_device_name(0)
+    _GPU.append(name)
+    return name
+
+
+def device_name(family):
+    '''Device a model family actually runs on (TensorFlow has no GPU on native Windows, PyTorch does).'''
+    if family == 'yolo':
+        return gpu_name() if torch_device() != 'cpu' else 'cpu'
+    return gpu_name() if setup_tf().config.list_physical_devices('GPU') else 'cpu'
+
+
+def free_gpu():
+    '''Release cached PyTorch GPU memory so a TensorFlow step can use it next.'''
+    gc.collect()
+    if 'torch' in sys.modules:
+        torch = sys.modules['torch']
         if torch.cuda.is_available():
-            return torch.cuda.get_device_name(0)
-    except ImportError:
-        pass
-    if 'tensorflow' in sys.modules:
-        tf = sys.modules['tensorflow']
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            return tf.config.experimental.get_device_details(gpus[0]).get('device_name', 'GPU')
-    return 'cpu'
+            torch.cuda.empty_cache()
 
 
 def environment():
@@ -198,37 +227,120 @@ def is_done(name):
     return step_status(name).get('status') == 'done'
 
 
-def mark(name, status, **extra):
+# Steps running in this process: name -> (session start, seconds from earlier sessions)
+_ACTIVE = {}
+
+
+def step_elapsed(name):
+    '''Wall time of a step summed over all sessions (time after the last heartbeat of a killed session is lost).'''
+    if name in _ACTIVE:
+        t0, prior = _ACTIVE[name]
+        return round(prior + time.perf_counter() - t0, 1)
+    return step_status(name).get('elapsed_s')
+
+
+def fmt_dur(sec):
+    if not sec:
+        return '-'
+    if sec < 60:
+        return f'{sec:.0f} s'
+    return f'{sec / 3600:.1f} h' if sec >= 3600 else f'{sec / 60:.1f} min'
+
+
+def mark(name, status, quiet=False, **extra):
     d = step_status(name)
     if status == 'running' and d.get('status') != 'running':
         d['started'] = now()
         d.pop('error', None)
     d.update(extra)
-    d.update(step=name, status=status, profile=PROFILE, updated=now())
+    if name in _ACTIVE:
+        d['elapsed_s'] = step_elapsed(name)
+    d.update(step=name, status=status, profile=PROFILE, gpu=gpu_name(), updated=now())
     if status == 'done':
         d['finished'] = now()
     write_json(PROGRESS / f'{name}.json', d)
-    if not extra or status != 'running':
-        log(f'{name}: {status}')
+    if not quiet:
+        log(f'{name}: {status}' + (f' after {fmt_dur(d["elapsed_s"])}' if status != 'running' and d.get('elapsed_s') else ''))
     write_status()
+
+
+def progress(name, **info):
+    '''Heartbeat (epoch, loss, elapsed time) while a step runs through run_step.'''
+    if name in _ACTIVE:
+        mark(name, 'running', quiet=True, **info)
+
+
+def gpu_temp():
+    try:
+        out = subprocess.run(['nvidia-smi', '--query-gpu=temperature.gpu', '--format=csv,noheader,nounits'],
+                             capture_output=True, text=True, timeout=20)
+        return float(out.stdout.split()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+_COOL = {}
+
+
+def cool_down(step=None):
+    '''Break between epochs so the machine can cool down (profile cooldown in config.yaml).
+
+    Called after the epoch checkpoint is saved. Break time is not counted as training time.
+    '''
+    cd = PROF.get('cooldown') or {}
+    if not cd:
+        return
+    _COOL.setdefault('since', time.time())
+    worked, temp = (time.time() - _COOL['since']) / 60, gpu_temp()
+    hot = bool(cd.get('max_gpu_temp')) and temp is not None and temp >= cd['max_gpu_temp']
+    due = bool(cd.get('every_minutes')) and worked >= cd['every_minutes']
+    if not (hot or due):
+        return
+    why = f'GPU at {temp:.0f} C' if hot else f'{worked:.0f} min of training'
+    log(f'cooldown break: {why}, pausing {cd["pause_minutes"]} min (until the GPU is under {cd["resume_gpu_temp"]} C)')
+    t0 = time.time()
+    if step:
+        progress(step, cooldown_since=now())
+    # Pause at least pause_minutes, longer while the GPU is still hot (capped at 3x)
+    while True:
+        time.sleep(30)
+        waited, temp = time.time() - t0, gpu_temp()
+        cool = temp is None or temp < cd['resume_gpu_temp']
+        if (waited >= 60 * cd['pause_minutes'] and cool) or waited >= 180 * cd['pause_minutes']:
+            break
+    paused = time.time() - t0
+    for k, (start, prior) in list(_ACTIVE.items()):
+        _ACTIVE[k] = (start + paused, prior)
+    _COOL['since'] = time.time()
+    if step:
+        d = step_status(step)
+        progress(step, cooldown_s=round(d.get('cooldown_s', 0) + paused), cooldown_since=None)
+    log(f'cooldown break over after {fmt_dur(paused)} (GPU at {temp or 0:.0f} C)')
 
 
 def run_step(name, fn, *args, redo=False, **kwargs):
     '''Run fn once and record it. Skips steps already marked done unless redo=True (passed on to fn).'''
-    if is_done(name) and not redo:
-        print(f'Skip {name}: already done')
+    old = step_status(name)
+    if old.get('status') == 'done' and not redo:
+        print(f'Skip {name}: already done ({fmt_dur(old.get("elapsed_s"))})')
         return None
-    mark(name, 'running')
+    fresh = redo or old.get('status') == 'done'
+    _ACTIVE[name] = (time.perf_counter(), 0.0 if fresh else old.get('elapsed_s') or 0.0)
+    sessions = 1 if fresh else old.get('sessions', 0) + 1
+    mark(name, 'running', sessions=sessions)
     try:
         out = fn(*args, redo=redo, **kwargs)
+        mark(name, 'done')
+        return out
     except KeyboardInterrupt:
         mark(name, 'interrupted')
         raise
     except Exception as e:
         mark(name, 'failed', error=f'{type(e).__name__}: {e}'[:500])
         raise
-    mark(name, 'done')
-    return out
+    finally:
+        _ACTIVE.pop(name, None)
+        free_gpu()
 
 
 def experiment(name):
@@ -277,6 +389,16 @@ def resolve_setup(e):
     return experiment(best)['setup'], best
 
 
+def epochs_for(e):
+    '''Epochs for an experiment: profile override by name, then the experiment, then profile per family, then defaults.'''
+    prof = PROF.get('epochs') or {}
+    if e['name'] in prof:
+        return prof[e['name']]
+    if 'epochs' in e:
+        return e['epochs']
+    return prof.get(e['family'], CFG[e['family']]['epochs'])
+
+
 def batch_for(family, imgsz):
     table = PROF[f'{family}_batch']
     return table.get(imgsz) or table.get(str(imgsz)) or min(table.values())
@@ -294,8 +416,8 @@ def save_run_config(name, params):
 # Status file for humans (and for picking up work on another machine)
 
 def write_status():
-    rows = ['| Experiment | Run on | Model saved | Val mAP50-95 | Test mAP50-95 | Test SAHI | Train step |',
-            '|---|---|---|---|---|---|---|']
+    rows = ['| Experiment | Run on | Model saved | Val mAP50-95 | Test mAP50-95 | Test SAHI | Train step | Train time | Eval time |',
+            '|---|---|---|---|---|---|---|---|---|']
 
     def fmt(m):
         return f'{100 * m["map50_95"]:.2f}' if m else '-'
@@ -307,14 +429,15 @@ def write_status():
             train += f' (epoch {st["epoch"]}/{st.get("epochs", "?")})'
         rows.append(f'| {name} | {", ".join(e.get("run_on", ["any"]))} | {"yes" if model_path(name).exists() else "no"} | '
                     f'{fmt(metrics_for(name, "val"))} | {fmt(metrics_for(name, "test"))} | '
-                    f'{fmt(metrics_for(name, "test", True))} | {train} |')
+                    f'{fmt(metrics_for(name, "test", True))} | {train} | {fmt_dur(st.get("elapsed_s"))} | '
+                    f'{fmt_dur(sum(step_status(f"eval_{name}_{s}").get("elapsed_s") or 0 for s in CFG["evaluation"]["splits"]))} |')
     recent = sorted(PROGRESS.glob('*.json'), key=lambda p: p.stat().st_mtime)[-12:] if PROGRESS.exists() else []
     steps = [f'- {d.get("updated")} `{d.get("step")}` {d.get("status")} on {d.get("profile")}'
-             + (f' ({d["error"]})' if d.get('error') else '') for d in (read_json(p, {}) for p in reversed(recent))]
+             + (f', {fmt_dur(d["elapsed_s"])}' if d.get('elapsed_s') else '') + (f' ({d["error"]})' if d.get('error') else '') for d in (read_json(p, {}) for p in reversed(recent))]
     text = ('### SkyScout status\n\nAuto-generated by skyscout.py, do not edit. '
             f'Updated {now()} on profile `{PROFILE}`.\n\n'
             'A step left as `running` with an old date was cut off (for example a Colab disconnect). '
-            'Run it again and it continues from the last saved epoch.\n\n'
+            'Run it again and it continues from the last saved epoch. Times are wall time summed over all sessions.\n\n'
             + '\n'.join(rows) + '\n\n#### Recent steps\n\n' + ('\n'.join(steps) or '- none yet') + '\n')
     write_text(RESULTS / 'STATUS.md', text)
     return text
@@ -366,9 +489,8 @@ def download(url, dest):
 
 
 def data_dir():
-    if PROFILE == 'colab':
-        return Path(CFG['paths']['colab_fast_data_dir']) / 'VisDrone'
-    return DOWNLOADS / 'VisDrone'
+    fast = PROF.get('data_dir')
+    return Path(os.path.expanduser(fast)) / 'VisDrone' if fast else DOWNLOADS / 'VisDrone'
 
 
 def split_dir(split):
@@ -524,7 +646,7 @@ def patch_yolo_ckpt(last, updates):
 
 def yolo_args(e):
     hp = {**CFG['yolo'], **e.get('overrides', {})}
-    hp.update({k: e[k] for k in ('epochs', 'fraction') if k in e})
+    hp.update({k: e[k] for k in ('fraction',) if k in e}, epochs=epochs_for(e))
     imgsz = e['imgsz']
     return {**hp, 'data': str(prepare_dataset()), 'imgsz': imgsz, 'batch': batch_for('yolo', imgsz),
             'workers': PROF['workers'], 'device': torch_device(), 'project': str(RUNS), 'name': e['name'],
@@ -545,30 +667,56 @@ def train_yolo(name, redo=False):
     args = yolo_args(e)
     save_run_config(name, args)
     last, best = run_dir / 'weights' / 'last.pt', run_dir / 'weights' / 'best.pt'
+    step = f'train_{name}'
+
+    def on_epoch(tr):
+        # Ultralytics calls this once more after the final validation of best.pt, skip that one
+        if tr.epoch + 1 > tr.epochs:
+            return
+        progress(step, epoch=tr.epoch + 1, epochs=tr.epochs,
+                 val_map50_95=round(float((tr.metrics or {}).get('metrics/mAP50-95(B)', 0)), 4))
+        # last.pt is already saved when this callback runs
+        cool_down(step)
+
     state = yolo_ckpt_state(last)
     if state == 'resumable':
         log(f'{name}: resuming from {rel(last)}')
         patch_yolo_ckpt(last, {k: args[k] for k in ('data', 'project', 'name', 'workers')})
-        YOLO(str(last)).train(resume=True, batch=args['batch'], device=args['device'], workers=args['workers'])
+        model = YOLO(str(last))
+        model.add_callback('on_fit_epoch_end', on_epoch)
+        model.train(resume=True, batch=args['batch'], device=args['device'], workers=args['workers'])
     elif state == 'missing':
-        YOLO(str(yolo_weights(e['weights']))).train(**args)
+        model = YOLO(str(yolo_weights(e['weights'])))
+        model.add_callback('on_fit_epoch_end', on_epoch)
+        model.train(**args)
     MODELS.mkdir(parents=True, exist_ok=True)
     shutil.copy2(best if best.exists() else last, final)
-    write_json(MODELS / f'{name}.json', {'experiment': name, 'family': 'yolo', 'imgsz': e['imgsz'], 'saved': now()})
+    hist = run_dir / 'results.csv'
+    trained = max(len(hist.read_text().strip().splitlines()) - 1, 0) if hist.exists() else None
+    write_json(MODELS / f'{name}.json', {'experiment': name, 'family': 'yolo', 'imgsz': e['imgsz'], 'epochs': args['epochs'],
+                                         'epochs_trained': trained, 'batch': args['batch'], 'train_seconds': step_elapsed(step),
+                                         'gpu': device_name('yolo'), 'profile': PROFILE, 'saved': now()})
     log(f'{name}: saved fine-tuned model to {rel(final)}')
     return final
 
 
-def time_yolo_epoch(name, fraction=0.05):
+def time_yolo_epoch(name, batches=30):
+    '''Median time per training batch on a small slice, scaled to a full epoch (validation not included).'''
     from ultralytics import YOLO
     e = experiment(name)
-    args = {**yolo_args(e), 'epochs': 1, 'fraction': fraction, 'project': str(RUNS / '_timing'),
-            'plots': False, 'val': False}
-    t0 = time.time()
-    YOLO(str(yolo_weights(e['weights']))).train(**args)
-    sec = (time.time() - t0) / fraction
+    args = {**yolo_args(e), 'epochs': 1, 'project': str(RUNS / '_timing'), 'plots': False, 'val': False}
+    n_train = len(load_coco('train')['images']) * e.get('fraction', 1.0)
+    args['fraction'] = min(1.0, batches * args['batch'] / n_train)
+    stamps = []
+    model = YOLO(str(yolo_weights(e['weights'])))
+    model.add_callback('on_train_batch_end', lambda tr: stamps.append(time.perf_counter()))
+    model.train(**args)
     shutil.rmtree(RUNS / '_timing', ignore_errors=True)
-    return sec, e.get('epochs', CFG['yolo']['epochs'])
+    free_gpu()
+    if len(stamps) < 2:
+        raise RuntimeError('Too few batches to time')
+    per_step = float(np.median(np.diff(stamps[min(5, len(stamps) - 2):])))
+    return per_step * math.ceil(n_train / args['batch']), epochs_for(e)
 
 
 class YoloRunner:
@@ -620,7 +768,19 @@ def dfine_classes():
     import keras
     import keras_hub
     from keras_hub.src.models.d_fine import d_fine_loss as L
+    from scipy.optimize import linear_sum_assignment
     ops = keras.ops
+
+    def assign(cost, counts):
+        # Exact Hungarian matching per image with SciPy on CPU, as in the original D-FINE
+        b, q = cost.shape[:2]
+        cols, ok = np.zeros((b, q), np.int32), np.zeros((b, q), bool)
+        for i in range(b):
+            n = int(counts[i])
+            if n:
+                r, k = linear_sum_assignment(np.nan_to_num(cost[i, :, :n], nan=1e9, posinf=1e9, neginf=-1e9))
+                cols[i, r], ok[i, r] = k, True
+        return cols, ok
 
     class SkyDFine(keras_hub.models.DFineObjectDetector):
         '''D-FINE with a loss that handles a different number of boxes per image.
@@ -639,12 +799,33 @@ def dfine_classes():
             targets = [{'labels': tf.boolean_mask(labels, valid),
                         'boxes': tf.boolean_mask(ops.cast(y['boxes'], 'float32'), valid)}]
             n_boxes = ops.maximum(ops.cast(ops.sum(counts), 'float32'), 1.0)
-            cost = (self.use_focal_loss, self.matcher_alpha, self.matcher_gamma, self.matcher_bbox_cost,
-                    self.matcher_class_cost, self.matcher_ciou_cost, self.backbone)
+            # Padding sits at the end, so the first max(counts) columns hold every real box
+            m = ops.max(counts)
+            t_lab, t_box, t_ok = labels[:, :m], ops.cast(y['boxes'], 'float32')[:, :m], valid[:, :m]
             w, total = self.weight_dict, []
 
             def match(out):
-                rows, cols, ok = L.hungarian_matcher(out, targets, counts, *cost)
+                # Same cost as the KerasHub matcher, built for the whole batch at once instead of a TF loop per image
+                logits, boxes = out['logits'], out['pred_boxes']
+                safe = ops.maximum(t_lab, 0)
+                if self.use_focal_loss:
+                    p = tf.gather(ops.sigmoid(logits), safe, axis=2, batch_dims=1)
+                    a, g = self.matcher_alpha, self.matcher_gamma
+                    cls = a * (1 - p) ** g * -ops.log(p + 1e-8) - (1 - a) * p ** g * -ops.log(1 - p + 1e-8)
+                else:
+                    cls = -tf.gather(ops.softmax(logits, axis=-1), safe, axis=2, batch_dims=1)
+                l1 = ops.sum(ops.abs(boxes[:, :, None] - t_box[:, None]), axis=-1)
+                to_xyxy = keras.utils.bounding_boxes.convert_format
+                ciou = -keras.utils.bounding_boxes.compute_ciou(
+                    to_xyxy(boxes, source='center_xywh', target='xyxy')[:, :, None],
+                    to_xyxy(t_box, source='center_xywh', target='xyxy')[:, None], bounding_box_format='xyxy')
+                cost = self.matcher_bbox_cost * l1 + self.matcher_class_cost * cls + self.matcher_ciou_cost * ciou
+                cost = ops.where(t_ok[:, None, :], cost, 1e9)
+                with tf.device('/CPU:0'):
+                    cols, ok = tf.numpy_function(assign, [ops.stop_gradient(cost), counts], [tf.int32, tf.bool], stateful=False)
+                cols.set_shape(logits.shape[:2])
+                ok.set_shape(logits.shape[:2])
+                rows = ops.broadcast_to(ops.arange(ops.shape(logits)[1], dtype='int32')[None], ops.shape(cols))
                 return rows, cols + offsets, ok
 
             def add(out, ddf=None):
@@ -814,8 +995,10 @@ def _dfine_prepare(name):
     import keras
     e = experiment(name)
     hp = {**CFG['dfine'], **e.get('overrides', {})}
+    # The denoising embedding is unused (no denoising queries), so its missing gradient is expected
+    warnings.filterwarnings('ignore', message='Gradients do not exist for variables')
     setup, source = resolve_setup(e)
-    imgsz, epochs = e['imgsz'], e.get('epochs', hp['epochs'])
+    imgsz, epochs = e['imgsz'], epochs_for(e)
     batch = batch_for('dfine', imgsz)
     prepare_dataset()
     seed_everything()
@@ -831,8 +1014,8 @@ def _dfine_prepare(name):
         print(f'{name}: starting from fine-tuned {src}')
     opt = make_dfine_optimizer(det, setup, hp, steps, epochs)
     keras.Model.compile(det, optimizer=opt, jit_compile=hp['jit_compile'])
-    params = {'setup': setup, 'setup_from': source, 'init_from': init, 'imgsz': imgsz, 'epochs': epochs,
-              'batch': batch, 'steps_per_epoch': steps, 'fraction': e.get('fraction', 1.0), **hp}
+    params = {**hp, 'setup': setup, 'setup_from': source, 'init_from': init, 'imgsz': imgsz, 'epochs': epochs,
+              'batch': batch, 'steps_per_epoch': steps, 'fraction': e.get('fraction', 1.0)}
     return det, train_ds, val_ds, params
 
 
@@ -848,29 +1031,40 @@ def train_dfine(name, redo=False):
     run_dir.mkdir(parents=True, exist_ok=True)
     det, train_ds, val_ds, params = _dfine_prepare(name)
     save_run_config(name, params)
-    epochs = params['epochs']
+    epochs, step = params['epochs'], f'train_{name}'
 
     class EpochLog(keras.callbacks.Callback):
+        # Placed before CSVLogger so the epoch time also lands in history.csv
+        def on_epoch_begin(self, epoch, logs=None):
+            self.t0 = time.perf_counter()
+
         def on_epoch_end(self, epoch, logs=None):
+            if logs is not None:
+                logs['epoch_time_s'] = round(time.perf_counter() - self.t0, 1)
             logs = logs or {}
-            mark(f'train_{name}', 'running', epoch=epoch + 1, epochs=epochs,
-                 loss=float(logs.get('loss', 0)), val_loss=float(logs.get('val_loss', 0)))
+            progress(step, epoch=epoch + 1, epochs=epochs, loss=float(logs.get('loss', 0)),
+                     val_loss=float(logs.get('val_loss', 0)))
+            # BackupAndRestore runs first, so the epoch is saved before any break
+            cool_down(step)
 
     callbacks = [
         keras.callbacks.BackupAndRestore(str(run_dir / 'backup'), delete_checkpoint=False),
-        keras.callbacks.ModelCheckpoint(str(run_dir / 'last.weights.h5'), save_weights_only=True),
+        EpochLog(),
         keras.callbacks.ModelCheckpoint(str(run_dir / 'best.weights.h5'), save_weights_only=True,
                                         save_best_only=True, monitor='val_loss'),
         keras.callbacks.CSVLogger(str(run_dir / 'history.csv'), append=True),
-        EpochLog(),
     ]
     det.fit(train_ds, validation_data=val_ds, epochs=epochs, callbacks=callbacks, verbose=fit_verbose())
     MODELS.mkdir(parents=True, exist_ok=True)
+    # With EMA on, fit ends by copying the EMA weights into the model, so those are saved and evaluated
     det.save_weights(str(final))
     write_json(MODELS / f'{name}.json', {'experiment': name, 'family': 'dfine', 'imgsz': params['imgsz'],
                                           'setup': params['setup'], 'setup_from': params['setup_from'],
-                                          'preset': CFG['dfine']['preset'], 'saved': now()})
+                                          'epochs': epochs, 'batch': params['batch'], 'train_seconds': step_elapsed(step),
+                                          'gpu': device_name('dfine'), 'profile': PROFILE, 'preset': CFG['dfine']['preset'], 'saved': now()})
     log(f'{name}: saved fine-tuned model to {rel(final)}')
+    del det
+    keras.backend.clear_session()
     return final
 
 
@@ -884,6 +1078,8 @@ def time_dfine_epoch(name, steps=30):
             stamps.append(time.perf_counter())
 
     det.fit(train_ds.take(steps), epochs=1, callbacks=[Clock()], verbose=0)
+    del det
+    keras.backend.clear_session()
     per_step = float(np.median(np.diff(stamps[min(5, len(stamps) - 2):])))
     return per_step * params['steps_per_epoch'], params['epochs']
 
@@ -962,14 +1158,21 @@ def train(name, redo=False):
     return train_yolo(name, redo) if fam == 'yolo' else train_dfine(name, redo)
 
 
-def time_epoch(name):
-    '''Estimate one epoch before a full run. Saved to results/timing.json.'''
-    fam = experiment(name)['family']
+def time_epoch(name, redo=False):
+    '''Estimate one epoch (training batches only) before a full run. Saved to results/timing.json.'''
+    key = f'{name}@{PROFILE}'
+    timing = read_json(RESULTS / 'timing.json', {})
+    e = experiment(name)
+    batch = batch_for(e['family'], e['imgsz'])
+    if key in timing and timing[key].get('batch') == batch and not redo:
+        print(f'{name}: already timed on {PROFILE}: {timing[key]}')
+        return timing[key]
+    fam = e['family']
     sec, epochs = time_yolo_epoch(name) if fam == 'yolo' else time_dfine_epoch(name)
     epochs = epochs or CFG[fam]['epochs']
     timing = read_json(RESULTS / 'timing.json', {})
-    timing[f'{name}@{PROFILE}'] = {'epoch_min': round(sec / 60, 1), 'epochs': epochs,
-                                   'total_hours': round(sec * epochs / 3600, 1), 'gpu': gpu_name(), 'measured': now()}
+    timing[key] = {'epoch_min': round(sec / 60, 1), 'epochs': epochs, 'batch': batch,
+                   'total_hours': round(sec * epochs / 3600, 1), 'gpu': device_name(fam), 'measured': now()}
     write_json(RESULTS / 'timing.json', timing)
     log(f'{name}: about {sec / 60:.1f} min per epoch, {sec * epochs / 3600:.1f} h for {epochs} epochs')
     return timing[f'{name}@{PROFILE}']
@@ -1189,9 +1392,26 @@ def evaluate(name, split=None, sahi=False, redo=False):
     img_dir = split_dir(split) / 'images'
     runner = load_runner(name)
     images = coco['images'][:ev['limit']] if ev.get('limit') else coco['images']
-    dets, times = {}, []
-    print(f'Evaluating {name} on {split}{" with SAHI" if sahi else ""} ({len(images)} images)')
-    for i, im in enumerate(images):
+    # Detections are saved every few hundred images so a disconnect only loses the last batch
+    part = out_dir / 'partial.pkl'
+    state = {'dets': {}, 'times': [], 'seconds': 0.0}
+    if part.exists() and not redo:
+        with open(part, 'rb') as f:
+            state = pickle.load(f)
+        print(f'Resuming evaluation at image {len(state["dets"])}')
+    dets, times = state['dets'], state['times']
+    todo = [im for im in images if im['id'] not in dets]
+    t_start = time.perf_counter()
+
+    def save_partial():
+        out_dir.mkdir(parents=True, exist_ok=True)
+        tmp = part.with_name('partial.pkl.tmp')
+        with open(tmp, 'wb') as f:
+            pickle.dump({'dets': dets, 'times': times, 'seconds': state['seconds'] + time.perf_counter() - t_start}, f)
+        os.replace(tmp, part)
+
+    print(f'Evaluating {name} on {split}{" with SAHI" if sahi else ""} ({len(images)} images, {len(todo)} to go)')
+    for i, im in enumerate(todo):
         img = read_rgb(img_dir / im['file_name'])
         t0 = time.perf_counter()
         if sahi:
@@ -1199,10 +1419,13 @@ def evaluate(name, split=None, sahi=False, redo=False):
         else:
             out, t = runner.predict([img], ev['conf'])
             dets[im['id']] = out[0]
+        # The first images of every session warm up the GPU and are left out of latency
         if i >= ev['warmup']:
             times.append({**t, 'total': (time.perf_counter() - t0) * 1e3})
-        if (i + 1) % 200 == 0:
-            print(f'  {i + 1}/{len(images)}')
+        if (i + 1) % ev['save_every'] == 0:
+            save_partial()
+            print(f'  {len(dets)}/{len(images)}')
+    eval_seconds = state['seconds'] + time.perf_counter() - t_start
     gts = {iid: g for iid, g in gt_by_image(coco).items() if iid in dets}
     m, per_class = coco_metrics(coco, dets)
     m.update(precision_recall_f1(gts, dets))
@@ -1211,12 +1434,15 @@ def evaluate(name, split=None, sahi=False, redo=False):
     m.update({
         'experiment': name, 'family': runner.family, 'split': split, 'sahi': sahi, 'imgsz': runner.imgsz,
         'setup': meta.get('setup', 'fine-tune'), 'n_images': len(images), 'params': runner.params(),
-        'gflops': runner.gflops(), 'gpu': gpu_name(), 'profile': PROFILE, 'evaluated': now(),
+        'gflops': runner.gflops(), 'gpu': device_name(runner.family), 'profile': PROFILE, 'evaluated': now(),
         'latency_ms': {k: float(np.mean([t.get(k, 0.0) for t in times])) for k in ('preprocess', 'inference', 'postprocess', 'total')},
+        'eval_seconds': round(eval_seconds, 1), 'train_seconds': meta.get('train_seconds'),
+        'train_gpu': meta.get('gpu'), 'epochs_trained': meta.get('epochs_trained', meta.get('epochs')),
         'per_class': per_class, 'confusion': confusion_matrix(gts, dets),
     })
     m['samples'] = {str(i): [dets[i][0], dets[i][1], dets[i][2]] for i in sample_ids(split) if i in dets}
     write_json(out_dir / 'metrics.json', m)
+    part.unlink(missing_ok=True)
     write_eval_report(m, out_dir)
     plot_confusion(np.array(m['confusion']), out_dir / 'confusion_matrix_normalized.png')
     log(f'{name} {split}{" sahi" if sahi else ""}: mAP50-95 {100 * m["map50_95"]:.2f}, mAP50 {100 * m["map50"]:.2f}, APs {100 * m["ap_small"]:.2f}')
@@ -1236,6 +1462,8 @@ def write_eval_report(m, out_dir):
              f'| Recall | {100 * m["recall"]:.2f} |', f'| F1 Score | {100 * m["f1"]:.2f} |',
              f'| Parameters | {m["params"] / 1e6:.1f}M |', f'| FLOPs | {flops} |',
              f'| Latency | {lat["total"]:.1f} ms/img (inference {lat["inference"]:.1f}, {post} {lat["postprocess"]:.1f}) |',
+             '', f'Training took {fmt_dur(m.get("train_seconds"))} on {m.get("train_gpu") or "?"} '
+             f'({m.get("epochs_trained") or "?"} epochs). Evaluation took {fmt_dur(m.get("eval_seconds"))} on {m["gpu"]}.',
              '', '#### Per-class performance', '', '| Class | mAP@50 | mAP@50-95 | AP small |', '|---|---|---|---|']
     lines += [f'| {r["class"]} | {100 * r["ap50"]:.2f} | {100 * r["ap50_95"]:.2f} | {100 * r["ap_small"]:.2f} |' for r in m['per_class']]
     lines += ['', '![Confusion matrix](confusion_matrix_normalized.png)', '']
@@ -1307,36 +1535,81 @@ def _bar(ax, labels, values, color, fmt='{:.1f}'):
     return bars
 
 
+def benchmark_latency(redo=False):
+    '''Re-time every saved model on this machine so all speeds in the report come from one GPU.'''
+    ev = CFG['evaluation']
+    path = RESULTS / 'latency.json'
+    table = read_json(path, {})
+    split = ev['report_split']
+    coco = load_coco(split)
+    files = [split_dir(split) / 'images' / im['file_name'] for im in coco['images'][:ev['warmup'] + ev['latency_images']]]
+    sahi_names = set(map(resolve_name, CFG['sahi']['experiments']))
+    for name in CFG['experiments']:
+        if not model_path(name).exists():
+            continue
+        for sahi in (False, True) if name in sahi_names else (False,):
+            key = name + ('+sahi' if sahi else '')
+            dev = device_name(experiment(name)['family'])
+            if key in table and table[key]['gpu'] == dev and not redo:
+                continue
+            runner, times = load_runner(name), []
+            print(f'Timing {key} on {len(files) - ev["warmup"]} images')
+            for i, p in enumerate(files):
+                img = read_rgb(p)
+                t0 = time.perf_counter()
+                _, t = sahi_predict(runner, img, ev['conf']) if sahi else runner.predict([img], ev['conf'])
+                if i >= ev['warmup']:
+                    times.append({**t, 'total': (time.perf_counter() - t0) * 1e3})
+            table[key] = {'gpu': dev, 'profile': PROFILE, 'measured': now(), 'n_images': len(times),
+                          'latency_ms': {k: float(np.mean([t.get(k, 0.0) for t in times])) for k in ('preprocess', 'inference', 'postprocess', 'total')}}
+            write_json(path, table)
+        _RUNNERS.pop(name, None)
+        free_gpu()
+    log(f'latency table: {len(table)} entries in {rel(path)}')
+    return table
+
+
 def make_report():
     '''Comparison table and plots from every saved metrics.json. Safe to run at any time.'''
     plt = _plt()
     split = CFG['evaluation']['report_split']
+    lat = read_json(RESULTS / 'latency.json', {})
     rows = []
     for name in CFG['experiments']:
         for sahi in (False, True):
             m = metrics_for(name, split, sahi)
             if m:
+                # Prefer latency re-measured on one shared GPU (python skyscout.py latency)
+                entry = lat.get(name + ('+sahi' if sahi else ''))
+                if entry:
+                    m['latency_ms'], m['gpu'] = entry['latency_ms'], entry['gpu']
                 rows.append(m)
     if not rows:
         print('No evaluated models yet. Recommended: run an experiment first')
         return None
     head = ['Model', 'Setup', 'Input', 'mAP@50', 'mAP@50-95', 'APs', 'Precision', 'Recall', 'F1',
-            'Params (M)', 'GFLOPs', 'Latency (ms)', 'NMS/post (ms)']
+            'Params (M)', 'GFLOPs', 'Latency (ms)', 'NMS/post (ms)', 'Epochs', 'Train time (h)', 'Train GPU']
     table = []
     for m in sorted(rows, key=lambda r: -r['map50_95']):
+        ts = m.get('train_seconds')
         table.append([m['experiment'] + (' + SAHI' if m['sahi'] else ''), m['setup'], m['imgsz'],
                       f'{100 * m["map50"]:.2f}', f'{100 * m["map50_95"]:.2f}', f'{100 * m["ap_small"]:.2f}',
                       f'{100 * m["precision"]:.2f}', f'{100 * m["recall"]:.2f}', f'{100 * m["f1"]:.2f}',
                       f'{m["params"] / 1e6:.1f}', f'{m["gflops"]:.1f}' if m.get('gflops') else 'n/a',
-                      f'{m["latency_ms"]["total"]:.1f}', f'{m["latency_ms"]["postprocess"]:.1f}'])
+                      f'{m["latency_ms"]["total"]:.1f}', f'{m["latency_ms"]["postprocess"]:.1f}',
+                      m.get('epochs_trained') or '-', f'{ts / 3600:.2f}' if ts else '-', m.get('train_gpu') or '-'])
     md = ['| ' + ' | '.join(head) + ' |', '|' + '---|' * len(head)] + ['| ' + ' | '.join(map(str, r)) + ' |' for r in table]
     with open(RESULTS / 'comparison.csv', 'w', newline='', encoding='utf-8') as f:
         csv.writer(f).writerows([head] + table)
     gpus = sorted({m['gpu'] for m in rows})
-    figs = [p for p in (plot_map_vs_latency(rows), plot_setups(), plot_input_size(), plot_sahi(),
-                        plot_data_efficiency(), plot_samples(split)) if p]
+    note = '' if len(gpus) == 1 else (' Recommended: run `python skyscout.py latency` on one machine so every '
+                                      'latency comes from the same GPU.')
+    figs = [p for p in (plot_main_metrics(), plot_costs(rows), plot_per_class(), plot_map_vs_latency(rows),
+                        plot_training_curves(), plot_setups(), plot_input_size(), plot_sahi(), plot_data_efficiency(),
+                        plot_quality(split), plot_samples(split)) if p]
     text = (f'### SkyScout results\n\nAll models scored on the VisDrone-DET **{split}** split with the same evaluation code. '
-            f'Latency measured with batch 1 on: {", ".join(gpus)}.\n\n#### Comparison\n\n' + '\n'.join(md) + '\n\n'
+            f'Latency measured with batch 1 on: {", ".join(gpus)}.{note} Train time is wall time summed over all sessions, '
+            f'so it depends on the machine each run used.\n\n#### Comparison\n\n' + '\n'.join(md) + '\n\n'
             + ''.join(f'![{p.stem}](plots/{p.name})\n\n' for p in figs)
             + '#### Per-model details\n\n' + ''.join(f'- [{m["experiment"]}{" + SAHI" if m["sahi"] else ""}]'
                                                    f'({rel(eval_dir(m["experiment"], split, m["sahi"]) / "report.md")[len("results/"):]})\n' for m in rows))
@@ -1475,6 +1748,167 @@ def plot_samples(split):
     return _save(fig, PLOTS / 'sample_predictions.png')
 
 
+def main_models(split=None):
+    '''Baseline, newest YOLO and fine-tuned D-FINE (config report.main_models) that have results, as {name: label}.'''
+    split = split or CFG['evaluation']['report_split']
+    out = {}
+    for name, label in CFG['report']['main_models'].items():
+        name = resolve_name(name)
+        if name == 'dfine_best_long_640' and not metrics_for(name, split):
+            name = best_dfine()
+        if name and metrics_for(name, split):
+            out[name] = label
+    return out
+
+
+def _grouped(ax, groups, series, fmt='{:.1f}'):
+    '''Grouped bars: groups on x, one colored bar per series {label: values}.'''
+    x, n = np.arange(len(groups)), len(series)
+    width = 0.8 / max(n, 1)
+    for j, (label, vals) in enumerate(series.items()):
+        bars = ax.bar(x + (j - (n - 1) / 2) * width, vals, width, color=PALETTE[j], edgecolor=SURFACE, linewidth=2, label=label)
+        for r, v in zip(bars, vals):
+            ax.text(r.get_x() + r.get_width() / 2, v, fmt.format(v), ha='center', va='bottom', fontsize=7, color=INK2)
+    ax.set_xticks(x, groups)
+
+
+def plot_main_metrics():
+    split = CFG['evaluation']['report_split']
+    mm = main_models(split)
+    if len(mm) < 2:
+        return None
+    plt = _plt()
+    keys = [('map50', 'mAP@50'), ('map50_95', 'mAP@50-95'), ('ap_small', 'AP small'), ('precision', 'Precision'),
+            ('recall', 'Recall'), ('f1', 'F1')]
+    fig, ax = plt.subplots(figsize=(10, 4.2))
+    _grouped(ax, [k[1] for k in keys], {lab: [100 * metrics_for(n, split)[k] for k, _ in keys] for n, lab in mm.items()})
+    ax.set_ylabel('Score (%)')
+    ax.set_title(f'Baseline vs newest YOLO vs fine-tuned D-FINE ({split} split)', loc='left')
+    ax.legend(loc='upper right')
+    return _save(fig, PLOTS / 'main_metrics.png')
+
+
+def plot_per_class():
+    split = CFG['evaluation']['report_split']
+    mm = main_models(split)
+    if len(mm) < 2:
+        return None
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(12, 4.2))
+    _grouped(ax, NAMES, {lab: [100 * r['ap50'] for r in metrics_for(n, split)['per_class']] for n, lab in mm.items()}, fmt='{:.0f}')
+    ax.set_ylabel('AP@50 (%)')
+    ax.set_title('Per-class AP@50', loc='left')
+    ax.tick_params(axis='x', rotation=20)
+    ax.legend(loc='upper right')
+    return _save(fig, PLOTS / 'per_class_ap50.png')
+
+
+def plot_costs(rows):
+    '''Computation cost of the main models: parameters, GFLOPs, latency and training time.'''
+    split = CFG['evaluation']['report_split']
+    mm = main_models(split)
+    by_name = {m['experiment']: m for m in rows if not m['sahi']}
+    mm = {n: lab for n, lab in mm.items() if n in by_name}
+    if len(mm) < 2:
+        return None
+    plt = _plt()
+    panels = [('Parameters (M)', lambda m: m['params'] / 1e6), ('GFLOPs per image', lambda m: m.get('gflops') or 0),
+              ('Latency (ms per image)', lambda m: m['latency_ms']['total']),
+              ('Training time (h)', lambda m: (m.get('train_seconds') or 0) / 3600)]
+    fig, axes = plt.subplots(1, 4, figsize=(13, 3.8))
+    for ax, (title, fn) in zip(axes, panels):
+        vals = [fn(by_name[n]) for n in mm]
+        bars = ax.bar(range(len(mm)), vals, color=PALETTE[:len(mm)], edgecolor=SURFACE, linewidth=2, width=0.6)
+        for r, v in zip(bars, vals):
+            ax.text(r.get_x() + r.get_width() / 2, v, f'{v:.1f}', ha='center', va='bottom', fontsize=8, color=INK2)
+        ax.set_xticks(range(len(mm)), [n.split('_')[0] for n in mm])
+        ax.set_title(title, loc='left', fontsize=10)
+    gpus = sorted({by_name[n]['gpu'] for n in mm})
+    fig.suptitle(f'Computation cost (latency on {", ".join(gpus)}, batch 1)', x=0.02, ha='left')
+    return _save(fig, PLOTS / 'compute_cost.png')
+
+
+def plot_training_curves():
+    '''Val mAP per epoch for YOLO and train/val loss per epoch for D-FINE, read from runs/.'''
+    import pandas as pd
+    yolo = {n: RUNS / n / 'results.csv' for n in CFG['experiments'] if experiment(n)['family'] == 'yolo'}
+    yolo = {n: p for n, p in yolo.items() if p.exists()}
+    dfine = {n: RUNS / n / 'history.csv' for n in CFG['experiments'] if experiment(n)['family'] == 'dfine'}
+    dfine = {n: p for n, p in dfine.items() if p.exists() and 'fraction' not in CFG['experiments'][n]}
+    if not yolo and not dfine:
+        return None
+    plt = _plt()
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    for j, (n, p) in enumerate(yolo.items()):
+        d = pd.read_csv(p)
+        d.columns = [c.strip() for c in d.columns]
+        axes[0].plot(d['epoch'], 100 * d['metrics/mAP50-95(B)'], color=PALETTE[j], linewidth=2, label=n)
+    axes[0].set_title('YOLO val mAP@50-95 per epoch (%)', loc='left')
+    axes[0].set_xlabel('Epoch')
+    for j, (n, p) in enumerate(dfine.items()):
+        d = pd.read_csv(p).drop_duplicates('epoch', keep='last')
+        axes[1].plot(d['epoch'] + 1, d['loss'], color=PALETTE[j], linewidth=2, label=f'{n} train')
+        if 'val_loss' in d:
+            axes[1].plot(d['epoch'] + 1, d['val_loss'], color=PALETTE[j], linewidth=2, linestyle='--', label=f'{n} val')
+    axes[1].set_title('D-FINE loss per epoch (dashed = val)', loc='left')
+    axes[1].set_xlabel('Epoch')
+    for ax in axes:
+        if ax.lines:
+            ax.legend(fontsize=7)
+    return _save(fig, PLOTS / 'training_curves.png')
+
+
+def dense_crop(boxes, h, w, frac=0.4):
+    '''Window (x1, y1, x2, y2) covering frac of each side with the most box centers in it.'''
+    cw, ch = int(w * frac), int(h * frac)
+    cx, cy = (boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2
+    best, win = -1, (0, 0, cw, ch)
+    for y in np.linspace(0, h - ch, 6).astype(int):
+        for x in np.linspace(0, w - cw, 6).astype(int):
+            n = int(((cx >= x) & (cx < x + cw) & (cy >= y) & (cy < y + ch)).sum())
+            if n > best:
+                best, win = n, (x, y, x + cw, y + ch)
+    return win
+
+
+def plot_quality(split=None):
+    '''Zoomed crops of dense test images: ground truth next to each main model, with object counts.'''
+    split = split or CFG['evaluation']['report_split']
+    mm = main_models(split)
+    ids = sample_ids(split)[:2]
+    if not mm or not ids:
+        return None
+    plt = _plt()
+    coco = load_coco(split)
+    files = {im['id']: im['file_name'] for im in coco['images']}
+    gts = gt_by_image(coco)
+    conf = CFG['demo']['conf']
+    fig, axes = plt.subplots(len(ids), len(mm) + 1, figsize=(4.2 * (len(mm) + 1), 3.4 * len(ids)), squeeze=False)
+    for r, iid in enumerate(ids):
+        img = read_rgb(split_dir(split) / 'images' / files[iid])
+        gb, gc = gts[iid]
+        x1, y1, x2, y2 = dense_crop(gb, *img.shape[:2])
+
+        def inside(b):
+            cx, cy = (b[:, 0] + b[:, 2]) / 2, (b[:, 1] + b[:, 3]) / 2
+            return (cx >= x1) & (cx < x2) & (cy >= y1) & (cy < y2)
+
+        panels = [(f'ground truth: {int(inside(gb).sum())} objects', draw_dets(img, gb, np.ones(len(gc)), gc))]
+        for n, lab in mm.items():
+            d = metrics_for(n, split)['samples'].get(str(iid))
+            if d:
+                b, s, c = np.array(d[0]).reshape(-1, 4), np.array(d[1]), np.array(d[2], int)
+                keep = s >= conf
+                panels.append((f'{lab}: {int(inside(b[keep]).sum())} found', draw_dets(img, b[keep], s[keep], c[keep])))
+        for c, ax in enumerate(axes[r]):
+            ax.axis('off')
+            if c < len(panels):
+                ax.imshow(panels[c][1][y1:y2, x1:x2])
+                ax.set_title(panels[c][0], fontsize=9)
+    fig.suptitle(f'Zoomed view of dense test images (confidence >= {conf}, box color = class)', x=0.02, ha='left')
+    return _save(fig, PLOTS / 'quality_zoom.png')
+
+
 # Pipeline
 
 def run_experiment(name, redo=False, anywhere=False):
@@ -1498,65 +1932,256 @@ def run_sahi(redo=False):
             run_step(f'sahi_{name}', evaluate, name, split, sahi=True, redo=redo)
 
 
-def run_all():
+def experiment_done(name):
+    return is_done(f'train_{name}') and all(is_done(f'eval_{name}_{s}') for s in CFG['evaluation']['splits'])
+
+
+def run_child(*args):
+    '''Run one CLI command in a fresh Python process so TensorFlow and PyTorch never share GPU memory.'''
+    cmd = [sys.executable, str(ROOT / 'skyscout.py'), *args]
+    env = {**os.environ, 'SKYSCOUT_PROFILE': PROFILE, 'PYTHONUNBUFFERED': '1'}
+    code = subprocess.run(cmd, cwd=str(ROOT), env=env).returncode
+    if code != 0:
+        log(f'{" ".join(args)} stopped with exit code {code}, see results/STATUS.md')
+    return code == 0
+
+
+def run_all(isolate=None):
     '''Everything this machine is allowed to run, in config order. Re-run after any interruption.'''
+    isolate = 'ipykernel' not in sys.modules if isolate is None else isolate
+    t0 = time.perf_counter()
     log(f'run_all started on {PROFILE} ({gpu_name()})')
     prepare_dataset()
     if not (RESULTS / 'dataset_summary.md').exists():
         dataset_summary()
+    failed = []
     for name, e in CFG['experiments'].items():
+        if experiment_done(name):
+            continue
+        if not allowed_here(e):
+            print(f'Recommended: run {name} on {", ".join(e["run_on"])}')
+            continue
         if e.get('setup') == 'best' and best_dfine() is None:
             print(f'Skip {name}: the D-FINE setups are not all evaluated yet')
             continue
-        run_experiment(name)
-    run_sahi()
+        if isolate:
+            ok = run_child('run', name)
+        else:
+            try:
+                run_experiment(name)
+                ok = True
+            except Exception as ex:
+                print(f'{name} failed: {type(ex).__name__}: {ex}')
+                ok = False
+        if not ok:
+            failed.append(name)
+    if isolate:
+        run_child('sahi')
+        run_child('latency')
+    else:
+        run_sahi()
+        benchmark_latency()
     make_report()
     show_status()
+    log(f'run_all finished in {fmt_dur(time.perf_counter() - t0)}' + (f', failed: {", ".join(failed)}' if failed else ''))
+
+
+# Gradio demo
+
+def detect(runner, img, conf, tiles=False):
+    '''One image -> ((boxes, scores, classes), times in ms).'''
+    if tiles:
+        return sahi_predict(runner, img, conf)
+    out, t = runner.predict([img], conf)
+    return out[0], t
+
+
+def even_resize(img, max_w):
+    '''Shrink to max_w wide with even sides (needed by the H.264 video encoder).'''
+    import cv2
+    h, w = img.shape[:2]
+    s = min(1.0, max_w / w)
+    nw, nh = max(int(w * s) // 2 * 2, 2), max(int(h * s) // 2 * 2, 2)
+    return img if (nw, nh) == (w, h) else cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+
+
+def video_writer(path, fps):
+    import imageio.v2 as iio
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return iio.get_writer(str(path), fps=max(fps, 1), codec='libx264', macro_block_size=1, quality=7,
+                          ffmpeg_log_level='error')
+
+
+def sample_clip():
+    '''Short clip from the VisDrone test-dev sequence with the most frames (frames are far apart, so motion is jumpy).'''
+    dc = CFG['demo']
+    out = DOWNLOADS / 'samples' / 'visdrone_testdev_clip.mp4'
+    if out.exists():
+        return out
+    split = CFG['evaluation']['report_split']
+    seqs = defaultdict(list)
+    for im in load_coco(split)['images']:
+        seqs[(im['file_name'].split('_')[0], im['width'], im['height'])].append(im['file_name'])
+    frames = sorted(max(seqs.values(), key=len))[:dc['clip_frames']]
+    tmp = out.with_name('clip_tmp.mp4')
+    with video_writer(tmp, dc['clip_fps']) as w:
+        for f in frames:
+            w.append_data(even_resize(read_rgb(split_dir(split) / 'images' / f), dc['video_max_width']))
+    os.replace(tmp, out)
+    print(f'Sample clip: {len(frames)} frames saved to {rel(out)}')
+    return out
+
+
+def sample_videos():
+    '''Demo videos: the VisDrone sample clip, any URL in config, and every .mp4 put in downloads/samples.'''
+    folder = DOWNLOADS / 'samples'
+    folder.mkdir(parents=True, exist_ok=True)
+    for url in CFG['demo'].get('sample_video_urls') or []:
+        try:
+            download(url, folder / Path(url.split('?')[0]).name)
+        except Exception as e:
+            print(f'Sample video not downloaded ({type(e).__name__}): {url}')
+    try:
+        sample_clip()
+    except Exception as e:
+        print(f'Sample clip not made ({type(e).__name__}: {e})')
+    return sorted(p for p in folder.glob('*.mp4') if p.name != 'clip_tmp.mp4')
+
+
+def model_card(name):
+    '''Saved test-set scores for the selected model (the demo does not re-evaluate).'''
+    split = CFG['evaluation']['report_split']
+    m, meta = metrics_for(name, split), read_json(MODELS / f'{name}.json', {})
+    if not m:
+        return f'`{name}` has no saved evaluation yet. Recommended: run `python skyscout.py eval {name}`'
+    lat = m['latency_ms']
+    return (f'**{name}** ({m["family"]}, {m["setup"]}, {m["imgsz"]} px) scored on the {split} split: '
+            f'mAP@50-95 **{100 * m["map50_95"]:.1f}%**, mAP@50 {100 * m["map50"]:.1f}%, AP small {100 * m["ap_small"]:.1f}%, '
+            f'precision {100 * m["precision"]:.1f}%, recall {100 * m["recall"]:.1f}%, F1 {100 * m["f1"]:.1f}%. '
+            f'{m["params"] / 1e6:.1f}M parameters, {lat["total"]:.0f} ms per image on {m["gpu"]}. '
+            f'Trained for {fmt_dur(meta.get("train_seconds"))} on {meta.get("gpu", "?")}.')
 
 
 def launch_demo(name=None, share=None):
-    '''Gradio app: upload a drone image, get boxes and a count per class.'''
+    '''Gradio app: pick a model, run it on a drone photo or video, get boxes and counts per class.'''
+    import cv2
     import gradio as gr
+    import pandas as pd
+    dc = CFG['demo']
     choices = [n for n in CFG['experiments'] if model_path(n).exists()]
     if not choices:
         raise FileNotFoundError('No fine-tuned models yet. Recommended: train at least one experiment first')
     split = CFG['evaluation']['report_split']
     scored = {n: (metrics_for(n, split) or {}).get('map50_95', -1) for n in choices}
     default = name or max(scored, key=scored.get)
+    colors = {n: BOX_COLORS[k] for k, n in enumerate(NAMES)}
 
-    def infer(image, model_name, conf, tiles):
+    def on_image(image, model_name, conf, tiles):
         if image is None:
-            return None, []
+            return None, None, 'Upload or pick a drone image first.'
         runner = load_runner(model_name)
-        if tiles:
-            (b, s, c), _ = sahi_predict(runner, image, conf)
-        else:
-            out, _ = runner.predict([image], conf)
-            b, s, c = out[0]
-        counts = np.bincount(c, minlength=NC)
-        table = [[NAMES[k], int(counts[k])] for k in np.argsort(-counts) if counts[k]]
-        return draw_dets(image, b, s, c), table + [['total', int(counts.sum())]]
+        t0 = time.perf_counter()
+        (b, s, c), _ = detect(runner, image, conf, tiles)
+        ms = (time.perf_counter() - t0) * 1e3
+        rows = [{'Class': NAMES[k], 'Count': int((c == k).sum()), 'Avg confidence': round(float(s[c == k].mean()), 2)}
+                for k in range(NC) if (c == k).any()]
+        table = pd.DataFrame(sorted(rows, key=lambda r: -r['Count']), columns=['Class', 'Count', 'Avg confidence'])
+        info = (f'**{len(c)} objects** in {len(rows)} classes, found by `{model_name}` in {ms:.0f} ms '
+                f'({"SAHI tiles" if tiles else "full image"}, confidence >= {conf:.2f}).')
+        return draw_dets(image, b, s, c), table, info
 
-    examples = []
+    def on_video(video, model_name, conf, tiles, progress=gr.Progress()):
+        if not video:
+            return None, None, None, 'Upload or pick a video first.'
+        runner = load_runner(model_name)
+        cap = cv2.VideoCapture(video)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        stride, limit = max(1, dc['video_stride']), dc['video_max_frames']
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        n_out = min(math.ceil(total / stride), limit) if total else limit
+        out_path = RESULTS / 'demo' / f'{Path(video).stem}_{model_name}{"_sahi" if tiles else ""}.mp4'
+        rows, ms, idx, done = [], [], 0, 0
+        with video_writer(out_path, fps / stride) as w:
+            while done < limit:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if idx % stride == 0:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    t0 = time.perf_counter()
+                    (b, s, c), _ = detect(runner, rgb, conf, tiles)
+                    ms.append((time.perf_counter() - t0) * 1e3)
+                    counts = np.bincount(c, minlength=NC)
+                    rows += [{'time_s': round(idx / fps, 2), 'class': NAMES[k], 'count': int(counts[k])} for k in range(NC)]
+                    w.append_data(even_resize(draw_dets(rgb, b, s, c), dc['video_max_width']))
+                    done += 1
+                    progress((done, n_out), desc='Detecting frames')
+                idx += 1
+        cap.release()
+        if not done:
+            return None, None, None, 'Could not read any frames from this video.'
+        df = pd.DataFrame(rows)
+        agg = df.groupby('class')['count'].agg(['mean', 'max'])
+        agg = agg[agg['max'] > 0].sort_values('mean', ascending=False)
+        table = pd.DataFrame({'Class': agg.index, 'Avg per frame': agg['mean'].round(1).values, 'Max in one frame': agg['max'].values})
+        per_frame = df.groupby('time_s')['count'].sum()
+        info = (f'Processed **{done} frames** with `{model_name}` ({"SAHI tiles" if tiles else "full image"}, '
+                f'confidence >= {conf:.2f}): {np.mean(ms):.0f} ms per frame ({1000 / np.mean(ms):.1f} FPS). '
+                f'Objects per frame: {per_frame.mean():.0f} on average, {per_frame.max()} at most. '
+                'Counts are per frame, the same object in two frames is counted twice.')
+        return str(out_path), table, df[df['class'].isin(agg.index)], info
+
+    img_examples = []
     with contextlib.suppress(Exception):
-        coco = load_coco(split)
-        files = {im['id']: im['file_name'] for im in coco['images']}
-        examples = [[str(split_dir(split) / 'images' / files[i]), default, CFG['demo']['conf'], False] for i in sample_ids(split)]
-    legend = ', '.join(f'<span style="color:{BOX_COLORS[k]}">&#9632;</span> {n}' for k, n in enumerate(NAMES))
-    app = gr.Interface(
-        fn=infer,
-        inputs=[gr.Image(type='numpy', label='Drone image'), gr.Dropdown(choices, value=default, label='Model'),
-                gr.Slider(0.05, 0.95, value=CFG['demo']['conf'], step=0.05, label='Confidence threshold'),
-                gr.Checkbox(label='Tiled inference (SAHI), slower but finds smaller objects')],
-        outputs=[gr.Image(label='Detections'), gr.Dataframe(headers=['Class', 'Count'], label='Objects per class')],
-        examples=examples or None, title='SkyScout: small-object detection in drone images',
-        description=f'Upload a drone photo. Box colors: {legend}', flagging_mode='never')
-    return app.launch(share=(PROFILE == 'colab') if share is None else share)
+        files = {im['id']: im['file_name'] for im in load_coco(split)['images']}
+        img_examples = [[str(split_dir(split) / 'images' / files[i])] for i in sample_ids(split)]
+    videos = sample_videos()
+    legend = ' '.join(f'<span style="color:{BOX_COLORS[k]}">&#9632;</span> {n}&nbsp;' for k, n in enumerate(NAMES))
+
+    with gr.Blocks(title='SkyScout') as app:
+        gr.Markdown('### SkyScout: small-object detection in drone images\n'
+                    'Pick a fine-tuned model, then try a drone photo or video. The scores below come from the saved '
+                    'test-set evaluation, this page is for trying the models out.')
+        with gr.Row():
+            model = gr.Dropdown(choices, value=default, label='Model', scale=2)
+            conf = gr.Slider(0.05, 0.95, value=dc['conf'], step=0.05, label='Confidence threshold', scale=2)
+            tiles = gr.Checkbox(label='Tiled inference (SAHI), slower but finds smaller objects', scale=1)
+        card = gr.Markdown(model_card(default))
+        gr.HTML(f'<div style="font-size:0.9em">Box colors: {legend}</div>')
+        with gr.Tab('Image'):
+            with gr.Row():
+                img_in = gr.Image(type='numpy', label='Drone image')
+                img_out = gr.Image(label='Detections')
+            img_btn = gr.Button('Detect objects', variant='primary')
+            img_info = gr.Markdown()
+            img_table = gr.Dataframe(label='Objects per class', interactive=False)
+            if img_examples:
+                gr.Examples(img_examples, inputs=[img_in], label='Test-set images')
+        with gr.Tab('Video'):
+            with gr.Row():
+                vid_in = gr.Video(label='Drone video')
+                vid_out = gr.Video(label='Detections')
+            vid_btn = gr.Button('Detect objects in video', variant='primary')
+            vid_info = gr.Markdown(f'Recommended: keep clips short, at most {dc["video_max_frames"]} frames are processed.')
+            with gr.Row():
+                vid_table = gr.Dataframe(label='Objects per class', interactive=False)
+                vid_plot = gr.LinePlot(x='time_s', y='count', color='class', color_map=colors, label='Objects per frame',
+                                       x_title='Time (s)', y_title='Count')
+            if videos:
+                gr.Examples([[str(v)] for v in videos], inputs=[vid_in], label='Sample videos')
+        model.change(model_card, model, card)
+        img_btn.click(on_image, [img_in, model, conf, tiles], [img_out, img_table, img_info])
+        vid_btn.click(on_video, [vid_in, model, conf, tiles], [vid_out, vid_table, vid_plot, vid_info])
+    share = (PROFILE == 'colab') if share is None else share
+    # Recommended: on the server keep the default address and open it through an SSH tunnel
+    return app.launch(share=share, server_port=dc['server_port'],
+                      allowed_paths=[str(data_dir()), str(DOWNLOADS / 'samples'), str(RESULTS)])
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='SkyScout pipeline (settings in config.yaml)')
-    p.add_argument('command', choices=['status', 'prepare', 'summary', 'time', 'train', 'eval', 'run', 'sahi', 'all', 'report', 'demo'])
+    p.add_argument('command', choices=['status', 'prepare', 'summary', 'time', 'train', 'eval', 'run', 'sahi',
+                                        'latency', 'all', 'report', 'demo'])
     p.add_argument('names', nargs='*', help='experiment names from config.yaml')
     p.add_argument('--split', help='val or test (default from config)')
     p.add_argument('--sahi', action='store_true', help='evaluate with tiled inference')
@@ -1574,6 +2199,8 @@ def main(argv=None):
         run_all()
     elif a.command == 'sahi':
         run_sahi(a.redo)
+    elif a.command == 'latency':
+        benchmark_latency(a.redo)
     elif a.command == 'report':
         make_report()
     elif a.command == 'demo':
@@ -1583,7 +2210,7 @@ def main(argv=None):
             p.error(f'{a.command} needs at least one experiment name')
         for n in a.names:
             if a.command == 'time':
-                time_epoch(n)
+                time_epoch(n, redo=a.redo)
             elif a.command == 'train':
                 run_step(f'train_{n}', train, n, redo=a.redo)
             elif a.command == 'eval':
@@ -1595,7 +2222,18 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    main()
+    code = 0
+    try:
+        main()
+    except KeyboardInterrupt:
+        code = 130
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 0
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        code = 1
     # TensorFlow and PyTorch threads can block a normal exit, everything is saved by now
     sys.stdout.flush()
-    os._exit(0)
+    sys.stderr.flush()
+    os._exit(code)

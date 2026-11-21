@@ -2,10 +2,6 @@
 
 seed: 42
 
-paths:
-  # Recommended: keep the extracted dataset on the Colab local disk, reading thousands of images from Drive is slow
-  colab_fast_data_dir: /content/data
-
 dataset:
   base_url: https://github.com/ultralytics/assets/releases/download/v0.0.0
   splits:
@@ -15,10 +11,15 @@ dataset:
   names: [pedestrian, people, bicycle, car, van, truck, tricycle, awning-tricycle, bus, motor]
   drop_categories: [0, 11]   # 0 = ignored regions, 11 = others
 
-# Each machine is detected automatically. Set SKYSCOUT_PROFILE=colab|server|local to force one.
+# Each machine is detected automatically (WSL counts as local). Set SKYSCOUT_PROFILE=colab|server|local to force one.
+# data_dir (optional) = where the dataset is extracted, otherwise downloads/VisDrone
+# epochs (optional) = per-machine epochs by experiment name or family, otherwise the values below
+# cooldown (optional) = breaks between epochs, remove it to train without breaks
 # Recommended: if you get an out-of-memory error, lower the batch for that input size.
 profiles:
   colab:
+    # Recommended: keep the extracted dataset on the Colab local disk, reading thousands of images from Drive is slow
+    data_dir: /content/data
     yolo_batch: {640: 16, 1024: 6}
     dfine_batch: {640: 8, 1024: 2}
     workers: 2
@@ -28,8 +29,12 @@ profiles:
     workers: 8
   local:
     yolo_batch: {640: 8, 1024: 2}
-    dfine_batch: {640: 2, 1024: 1}
+    dfine_batch: {640: 4, 1024: 1}   # 6 does not fit in 6 GB at 640
     workers: 4
+    # Recommended: shorter schedules so every run fits on one laptop GPU in about a day
+    epochs: {yolo: 50, dfine: 6, dfine_best_long_640: 10}
+    # Breaks at epoch ends so a laptop can cool down: every N minutes of training, or early when the GPU is too hot
+    cooldown: {every_minutes: 60, pause_minutes: 10, max_gpu_temp: 85, resume_gpu_temp: 60}
 
 # Ultralytics training arguments (passed straight to model.train)
 yolo:
@@ -51,13 +56,13 @@ yolo:
 dfine:
   preset: dfine_small_obj2coco
   epochs: 30
-  lr: 0.0002
+  lr: 0.0001            # Recommended: D-FINE uses 2e-4 at batch 32, halved here for the smaller batches
   min_lr_ratio: 0.05
   warmup_epochs: 1
   weight_decay: 0.0001
   clipnorm: 0.1
-  ema: true
-  ema_momentum: 0.9999
+  ema: false            # Recommended: Keras EMA adds about a third to every step, turn on for long schedules
+  ema_momentum: 0.999   # Recommended: keep at 0.999, Keras EMA has no warmup so 0.9999 keeps too much of the untrained head
   llrd_decay: 0.8       # lr multiplier per backbone group, earliest layers get the smallest lr
   llrd_groups: 5
   max_boxes: 300        # D-FINE matches at most one object per query
@@ -76,7 +81,7 @@ experiments:
   dfine_frozen_640: {family: dfine, setup: frozen, imgsz: 640}
   dfine_full_640:   {family: dfine, setup: full, imgsz: 640}
   dfine_llrd_640:   {family: dfine, setup: llrd, imgsz: 640}
-  dfine_best_long_640: {family: dfine, setup: best, init_from: best, imgsz: 640, epochs: 40, overrides: {lr: 0.0001}}
+  dfine_best_long_640: {family: dfine, setup: best, init_from: best, imgsz: 640, epochs: 40, overrides: {lr: 0.00005}}
   dfine_best_25:    {family: dfine, setup: best, imgsz: 640, fraction: 0.25}
   dfine_best_50:    {family: dfine, setup: best, imgsz: 640, fraction: 0.5}
   yolo11s_1024:     {family: yolo, weights: yolo11s.pt, imgsz: 1024, run_on: [server]}
@@ -95,6 +100,8 @@ evaluation:
   cm_conf: 0.25
   cm_iou: 0.45
   warmup: 10            # first images skipped in latency numbers
+  latency_images: 200   # images timed by `python skyscout.py latency`
+  save_every: 200       # evaluation progress is saved every N images
   sample_images: 3
   limit: null           # set a number for a quick test run
 
@@ -109,6 +116,7 @@ sahi:
 
 # 'best' = the best D-FINE setup at 30 epochs (picked on val mAP50-95)
 report:
+  main_models: {yolo11s_640: YOLO11s (baseline), yolo26s_640: YOLO26s (newest YOLO), dfine_best_long_640: D-FINE (fine-tuned)}
   data_efficiency: {25: dfine_best_25, 50: dfine_best_50, 100: best}
   input_size_pairs:
     - [yolo11s_640, yolo11s_1024]
@@ -117,3 +125,10 @@ report:
 
 demo:
   conf: 0.3
+  server_port: 7860
+  video_max_frames: 300   # Recommended: keep demo videos short, longer clips are cut here
+  video_stride: 1         # 2 = run on every second frame
+  video_max_width: 1280   # output video width, detection still runs on the full frame
+  clip_frames: 60         # sample clip made from one VisDrone test-dev sequence
+  clip_fps: 2
+  sample_video_urls: []   # optional extra .mp4 links, saved to downloads/samples
