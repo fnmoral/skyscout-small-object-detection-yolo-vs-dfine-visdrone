@@ -10,3 +10,4 @@ __pycache__/
 results/demo/
 results/**/partial.pkl
 clip_tmp.mp4
+results/run_all.txt

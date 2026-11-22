@@ -1,0 +1,11 @@
+{
+  "started": "2026-11-21 07:10:11",
+  "sessions": 1,
+  "elapsed_s": 39.0,
+  "step": "eval_yolo26s_640_val",
+  "status": "done",
+  "profile": "local",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "updated": "2026-11-21 07:10:50",
+  "finished": "2026-11-21 07:10:50"
+}

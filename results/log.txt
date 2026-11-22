@@ -1,0 +1,135 @@
+[2026-11-21 01:42:34] [local] yolo11s_640: about 1.6 min per epoch, 2.7 h for 100 epochs
+[2026-11-21 02:16:17] [local] dfine_full_640: about 27.9 min per epoch, 14.0 h for 30 epochs
+[2026-11-21 03:56:22] [local] run_all started on local (NVIDIA GeForce RTX 3060 Laptop GPU)
+[2026-11-21 03:56:23] [local] train_yolo11s_640: running
+[2026-11-21 04:59:56] [local] cooldown break: 61 min of training, pausing 10 min (until the GPU is under 60 C)
+[2026-11-21 05:09:57] [local] cooldown break over after 10.0 min (GPU at 38 C)
+[2026-11-21 05:21:27] [local] yolo11s_640: saved fine-tuned model to models/yolo11s_640.pt
+[2026-11-21 05:21:27] [local] train_yolo11s_640: done after 1.3 h
+[2026-11-21 05:21:28] [local] eval_yolo11s_640_val: running
+[2026-11-21 05:22:07] [local] yolo11s_640 val: mAP50-95 20.82, mAP50 35.42, APs 11.60
+[2026-11-21 05:22:07] [local] eval_yolo11s_640_val: done after 39 s
+[2026-11-21 05:22:07] [local] eval_yolo11s_640_test: running
+[2026-11-21 05:23:56] [local] yolo11s_640 test: mAP50-95 16.60, mAP50 28.88, APs 7.54
+[2026-11-21 05:23:56] [local] eval_yolo11s_640_test: done after 1.8 min
+[2026-11-21 05:23:57] [local] train_yolo26s_640: running
+[2026-11-21 06:28:10] [local] cooldown break: 62 min of training, pausing 10 min (until the GPU is under 60 C)
+[2026-11-21 06:38:11] [local] cooldown break over after 10.0 min (GPU at 38 C)
+[2026-11-21 07:10:10] [local] yolo26s_640: saved fine-tuned model to models/yolo26s_640.pt
+[2026-11-21 07:10:10] [local] train_yolo26s_640: done after 1.6 h
+[2026-11-21 07:10:11] [local] eval_yolo26s_640_val: running
+[2026-11-21 07:10:50] [local] yolo26s_640 val: mAP50-95 21.82, mAP50 37.02, APs 12.38
+[2026-11-21 07:10:50] [local] eval_yolo26s_640_val: done after 39 s
+[2026-11-21 07:10:50] [local] eval_yolo26s_640_test: running
+[2026-11-21 07:12:37] [local] yolo26s_640 test: mAP50-95 17.54, mAP50 30.62, APs 8.21
+[2026-11-21 07:12:37] [local] eval_yolo26s_640_test: done after 1.8 min
+[2026-11-21 07:12:38] [local] train_dfine_frozen_640: running
+[2026-11-21 08:45:09] [local] cooldown break: 73 min of training, pausing 10 min (until the GPU is under 60 C)
+[2026-11-21 08:55:10] [local] cooldown break over after 10.0 min (GPU at 39 C)
+[2026-11-21 09:13:58] [local] dfine_frozen_640: saved fine-tuned model to models/dfine_frozen_640.weights.h5
+[2026-11-21 09:14:06] [local] train_dfine_frozen_640: done after 1.9 h
+[2026-11-21 09:14:13] [local] eval_dfine_frozen_640_val: running
+[2026-11-21 09:16:16] [local] dfine_frozen_640 val: mAP50-95 18.35, mAP50 30.75, APs 10.59
+[2026-11-21 09:16:16] [local] eval_dfine_frozen_640_val: done after 2.0 min
+[2026-11-21 09:16:17] [local] eval_dfine_frozen_640_test: running
+[2026-11-21 09:21:00] [local] dfine_frozen_640 test: mAP50-95 14.53, mAP50 24.63, APs 7.43
+[2026-11-21 09:21:00] [local] eval_dfine_frozen_640_test: done after 4.7 min
+[2026-11-21 09:21:03] [local] train_dfine_full_640: running
+[2026-11-21 11:01:58] [local] cooldown break: 75 min of training, pausing 10 min (until the GPU is under 60 C)
+[2026-11-21 11:12:00] [local] cooldown break over after 10.0 min (GPU at 40 C)
+[2026-11-21 12:01:53] [local] dfine_full_640: saved fine-tuned model to models/dfine_full_640.weights.h5
+[2026-11-21 12:02:07] [local] train_dfine_full_640: done after 2.5 h
+[2026-11-21 12:02:18] [local] eval_dfine_full_640_val: running
+[2026-11-21 12:04:27] [local] dfine_full_640 val: mAP50-95 18.94, mAP50 31.79, APs 11.25
+[2026-11-21 12:04:27] [local] eval_dfine_full_640_val: done after 2.1 min
+[2026-11-21 12:04:28] [local] eval_dfine_full_640_test: running
+[2026-11-21 12:09:03] [local] dfine_full_640 test: mAP50-95 15.52, mAP50 26.43, APs 7.90
+[2026-11-21 12:09:03] [local] eval_dfine_full_640_test: done after 4.6 min
+[2026-11-21 12:09:06] [local] train_dfine_llrd_640: running
+[2026-11-21 13:49:25] [local] cooldown break: 74 min of training, pausing 10 min (until the GPU is under 60 C)
+[2026-11-21 13:59:27] [local] cooldown break over after 10.0 min (GPU at 38 C)
+[2026-11-21 14:50:24] [local] dfine_llrd_640: saved fine-tuned model to models/dfine_llrd_640.weights.h5
+[2026-11-21 14:50:44] [local] train_dfine_llrd_640: done after 2.5 h
+[2026-11-21 14:50:56] [local] eval_dfine_llrd_640_val: running
+[2026-11-21 14:53:00] [local] dfine_llrd_640 val: mAP50-95 18.45, mAP50 31.02, APs 10.83
+[2026-11-21 14:53:00] [local] eval_dfine_llrd_640_val: done after 2.1 min
+[2026-11-21 14:53:02] [local] eval_dfine_llrd_640_test: running
+[2026-11-21 14:57:37] [local] dfine_llrd_640 test: mAP50-95 15.12, mAP50 25.68, APs 7.69
+[2026-11-21 14:57:37] [local] eval_dfine_llrd_640_test: done after 4.6 min
+[2026-11-21 14:57:41] [local] train_dfine_best_long_640: running
+[2026-11-21 16:37:44] [local] cooldown break: 75 min of training, pausing 10 min (until the GPU is under 60 C)
+[2026-11-21 16:47:46] [local] cooldown break over after 10.0 min (GPU at 44 C)
+[2026-11-21 16:51:51] [local] train_dfine_best_long_640: failed after 1.7 h
+[2026-11-21 16:52:08] [local] run dfine_best_long_640 stopped with exit code 1, see results/STATUS.md
+[2026-11-21 16:52:09] [local] train_dfine_best_25: running
+[2026-11-21 16:58:18] [local] run dfine_best_25 stopped with exit code -6, see results/STATUS.md
+[2026-11-21 16:58:19] [local] train_dfine_best_50: running
+[2026-11-21 18:15:34] [local] cooldown break: 60 min of training, pausing 10 min (until the GPU is under 60 C)
+[2026-11-21 18:25:36] [local] cooldown break over after 10.0 min (GPU at 40 C)
+[2026-11-21 18:41:20] [local] dfine_best_50: saved fine-tuned model to models/dfine_best_50.weights.h5
+[2026-11-21 18:41:57] [local] train_dfine_best_50: done after 1.6 h
+[2026-11-21 18:42:17] [local] eval_dfine_best_50_val: running
+[2026-11-21 18:45:36] [local] dfine_best_50 val: mAP50-95 16.14, mAP50 27.32, APs 9.37
+[2026-11-21 18:45:37] [local] eval_dfine_best_50_val: done after 3.3 min
+[2026-11-21 18:45:45] [local] eval_dfine_best_50_test: running
+[2026-11-21 18:52:38] [local] dfine_best_50 test: mAP50-95 12.94, mAP50 22.15, APs 6.74
+[2026-11-21 18:52:38] [local] eval_dfine_best_50_test: done after 6.9 min
+[2026-11-21 18:52:53] [local] sahi_yolo11s_640: running
+[2026-11-21 18:58:08] [local] yolo11s_640 test sahi: mAP50-95 20.43, mAP50 35.50, APs 12.12
+[2026-11-21 18:58:08] [local] sahi_yolo11s_640: done after 5.3 min
+[2026-11-21 18:58:09] [local] sahi_yolo26s_640: running
+[2026-11-21 19:02:26] [local] yolo26s_640 test sahi: mAP50-95 21.02, mAP50 36.97, APs 12.85
+[2026-11-21 19:02:26] [local] sahi_yolo26s_640: done after 4.3 min
+[2026-11-21 19:07:05] [local] latency table: 8 entries in results/latency.json
+[2026-11-21 19:07:14] [local] run_all finished in 15.2 h, failed: dfine_best_long_640, dfine_best_25
+[2026-11-21 19:07:48] [local] run_all started on local (NVIDIA GeForce RTX 3060 Laptop GPU)
+[2026-11-21 19:07:49] [local] train_dfine_best_long_640: running
+[2026-11-21 19:11:24] [local] train_dfine_best_long_640: failed after 1.8 h
+[2026-11-21 19:11:39] [local] run dfine_best_long_640 stopped with exit code 1, see results/STATUS.md
+[2026-11-21 19:11:40] [local] train_dfine_best_25: running
+[2026-11-21 19:19:57] [local] train_dfine_best_25: failed after 8.3 min
+[2026-11-21 19:20:10] [local] run dfine_best_25 stopped with exit code 1, see results/STATUS.md
+[2026-11-21 19:20:37] [local] latency table: 8 entries in results/latency.json
+[2026-11-21 19:20:45] [local] run_all finished in 12.9 min, failed: dfine_best_long_640, dfine_best_25
+[2026-11-21 19:21:00] [local] run_all started on local (NVIDIA GeForce RTX 3060 Laptop GPU)
+[2026-11-21 19:21:00] [local] train_dfine_best_long_640: running
+[2026-11-21 19:36:11] [local] run dfine_best_long_640 stopped with exit code -6, see results/STATUS.md
+[2026-11-21 19:36:11] [local] dfine_best_long_640: retrying once from the last checkpoint
+[2026-11-21 19:36:12] [local] train_dfine_best_long_640: running
+[2026-11-21 21:20:42] [local] cooldown break: 75 min of training, pausing 10 min (until the GPU is under 60 C)
+[2026-11-21 21:30:45] [local] cooldown break over after 10.0 min (GPU at 40 C)
+[2026-11-21 21:56:08] [local] run dfine_best_long_640 stopped with exit code -6, see results/STATUS.md
+[2026-11-21 21:56:09] [local] train_dfine_best_25: running
+[2026-11-21 22:05:39] [local] run dfine_best_25 stopped with exit code -6, see results/STATUS.md
+[2026-11-21 22:05:39] [local] dfine_best_25: retrying once from the last checkpoint
+[2026-11-21 22:05:40] [local] train_dfine_best_25: running
+[2026-11-21 22:50:15] [local] dfine_best_25: saved fine-tuned model to models/dfine_best_25.weights.h5
+[2026-11-21 22:50:29] [local] train_dfine_best_25: done after 53.1 min
+[2026-11-21 22:50:38] [local] eval_dfine_best_25_val: running
+[2026-11-21 22:52:37] [local] dfine_best_25 val: mAP50-95 13.68, mAP50 23.07, APs 7.91
+[2026-11-21 22:52:37] [local] eval_dfine_best_25_val: done after 2.0 min
+[2026-11-21 22:52:38] [local] eval_dfine_best_25_test: running
+[2026-11-21 22:57:07] [local] dfine_best_25 test: mAP50-95 10.36, mAP50 17.80, APs 5.37
+[2026-11-21 22:57:07] [local] eval_dfine_best_25_test: done after 4.5 min
+[2026-11-21 22:58:16] [local] latency table: 9 entries in results/latency.json
+[2026-11-21 22:58:21] [local] run_all finished in 3.6 h, failed: dfine_best_long_640
+[2026-11-21 22:59:05] [local] run_all started on local (NVIDIA GeForce RTX 3060 Laptop GPU)
+[2026-11-21 22:59:05] [local] train_dfine_best_long_640: running
+[2026-11-21 23:49:58] [local] dfine_best_long_640: saved fine-tuned model to models/dfine_best_long_640.weights.h5
+[2026-11-21 23:50:04] [local] train_dfine_best_long_640: done after 4.4 h
+[2026-11-21 23:50:09] [local] eval_dfine_best_long_640_val: running
+[2026-11-21 23:51:58] [local] dfine_best_long_640 val: mAP50-95 20.97, mAP50 35.17, APs 12.84
+[2026-11-21 23:51:58] [local] eval_dfine_best_long_640_val: done after 1.8 min
+[2026-11-21 23:51:59] [local] eval_dfine_best_long_640_test: running
+[2026-11-21 23:56:22] [local] dfine_best_long_640 test: mAP50-95 17.19, mAP50 29.33, APs 8.78
+[2026-11-21 23:56:22] [local] eval_dfine_best_long_640_test: done after 4.4 min
+[2026-11-21 23:56:24] [local] sahi_dfine_best_long_640: running
+[2026-11-21 23:57:17] [local] sahi stopped with exit code -6, see results/STATUS.md
+[2026-11-21 23:58:29] [local] latency stopped with exit code -6, see results/STATUS.md
+[2026-11-21 23:58:34] [local] run_all finished in 59.5 min
+[2026-11-21 23:59:05] [local] sahi_dfine_best_long_640: running
+[2026-11-22 00:01:45] [local] sahi_dfine_best_long_640: running
+[2026-11-22 00:12:37] [local] dfine_best_long_640 test sahi: mAP50-95 19.44, mAP50 33.31, APs 11.51
+[2026-11-22 00:12:37] [local] sahi_dfine_best_long_640: done after 10.9 min
+[2026-11-22 00:20:13] [local] latency table: 11 entries in results/latency.json
+[2026-11-22 00:28:03] [local] latency table: 11 entries in results/latency.json

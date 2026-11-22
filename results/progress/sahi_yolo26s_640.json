@@ -1,0 +1,11 @@
+{
+  "started": "2026-11-21 18:58:09",
+  "sessions": 1,
+  "elapsed_s": 256.9,
+  "step": "sahi_yolo26s_640",
+  "status": "done",
+  "profile": "local",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "updated": "2026-11-21 19:02:26",
+  "finished": "2026-11-21 19:02:26"
+}

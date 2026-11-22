@@ -1,0 +1,134 @@
+{
+  "yolo11s_640": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:20:47",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 2.522220759991569,
+      "inference": 11.290688994992024,
+      "postprocess": 2.407960784991019,
+      "total": 21.71141200999614
+    }
+  },
+  "yolo11s_640+sahi": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:21:06",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 8.891718045000516,
+      "inference": 47.080748064994395,
+      "postprocess": 12.804092270004048,
+      "total": 85.84383937499639
+    }
+  },
+  "yolo26s_640": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:21:12",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 2.7329701349992774,
+      "inference": 13.372981290002599,
+      "postprocess": 2.342022455006827,
+      "total": 24.140266180002072
+    }
+  },
+  "yolo26s_640+sahi": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:21:32",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 9.768954214987389,
+      "inference": 48.120381264984644,
+      "postprocess": 13.224259454991625,
+      "total": 89.06782929001223
+    }
+  },
+  "dfine_frozen_640": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:22:33",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 3.8774627999907807,
+      "inference": 130.7797768750072,
+      "postprocess": 0.3604526799915675,
+      "total": 135.0512816000014
+    }
+  },
+  "dfine_full_640": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:23:19",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 4.316137569993543,
+      "inference": 132.35397120000698,
+      "postprocess": 0.3560353749958267,
+      "total": 137.06014166499585
+    }
+  },
+  "dfine_llrd_640": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:24:05",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 4.194694924989335,
+      "inference": 133.560532875008,
+      "postprocess": 0.3468746449993887,
+      "total": 138.13327031501444
+    }
+  },
+  "dfine_best_50": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:28:02",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 4.205295065003156,
+      "inference": 132.9912833999947,
+      "postprocess": 0.32851062000077036,
+      "total": 137.55725232000032
+    }
+  },
+  "dfine_best_25": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:27:16",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 4.321403749997899,
+      "inference": 134.19004416999655,
+      "postprocess": 0.37550654499682423,
+      "total": 138.92009431999895
+    }
+  },
+  "dfine_best_long_640": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:24:52",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 4.271587609997596,
+      "inference": 133.7866593550018,
+      "postprocess": 0.364314554997236,
+      "total": 138.4564829200042
+    }
+  },
+  "dfine_best_long_640+sahi": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "profile": "local",
+    "measured": "2026-11-22 00:26:29",
+    "n_images": 200,
+    "latency_ms": {
+      "preprocess": 34.968379735021244,
+      "inference": 373.6280586899909,
+      "postprocess": 4.275407065003947,
+      "total": 413.9397835650096
+    }
+  }
+}

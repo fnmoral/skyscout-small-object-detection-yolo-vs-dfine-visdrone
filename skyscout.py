@@ -379,6 +379,18 @@ def resolve_name(name):
     return best_dfine() if name == 'best' else name
 
 
+def best_conf(name, split=None):
+    '''Confidence with the best mean F1 on the report split (score scales differ between models), else the demo default.'''
+    m = metrics_for(name, split or CFG['evaluation']['report_split']) if name else None
+    return round(m['best_conf'], 2) if m and m.get('best_conf') else CFG['demo']['conf']
+
+
+def warm_start(name):
+    '''Experiment whose fine-tuned weights this one continues from (init_from), or None.'''
+    init = CFG['experiments'][name].get('init_from')
+    return resolve_name(init) if init else None
+
+
 def resolve_setup(e):
     if e.get('setup') != 'best':
         return e['setup'], None
@@ -751,6 +763,10 @@ _TF = {}
 
 
 def setup_tf():
+    # torchvision must load before TF: the other order crashes on two LLVM copies when YOLO or SAHI NMS runs later
+    if 'tensorflow' not in sys.modules:
+        with contextlib.suppress(ImportError):
+            import torchvision  # noqa: F401
     import tensorflow as tf
     if 'ready' not in _TF:
         for g in tf.config.list_physical_devices('GPU'):
@@ -873,6 +889,7 @@ def dfine_classes():
 def dfine_converter():
     '''Pixel scale and offset the pretrained D-FINE expects.'''
     if 'conv' not in _TF:
+        setup_tf()
         import keras_hub
         c = keras_hub.layers.DFineImageConverter.from_preset(CFG['dfine']['preset'])
         scale = 1 / 255 if c.scale is None else c.scale
@@ -1137,20 +1154,45 @@ class DFineRunner:
         return int(self.det.count_params())
 
     def gflops(self):
-        '''FLOPs from the TensorFlow profiler. Returns None if the profiler cannot handle the graph.'''
+        '''2 x multiply-adds of every conv and dense layer in one eager forward pass (same rule as Ultralytics/thop).
+        The TF profiler is not used: it skips matmuls and its conv count changes from trace to trace.'''
+        import keras
+        macs = [0]
+
+        def conv(layer, x, y):
+            return int(np.prod(y.shape[1:-1])) * int(np.prod(layer.kernel.shape))
+
+        def dense(layer, x, y):
+            return int(np.prod(x.shape[1:-1])) * int(np.prod(layer.kernel.shape))
+
+        def einsum(layer, x, y):
+            # product of every distinct index size in the equation, batch excluded
+            ins, out = layer.equation.split('->')
+            a, k = ins.split(',')
+            size = {**dict(zip(a, x.shape)), **dict(zip(k, layer.kernel.shape))}
+            return int(np.prod([size[c] for c in set(a + k) if c != a[0] and size[c]]))
+
+        rules = {keras.layers.Conv2D: conv, keras.layers.Dense: dense, keras.layers.EinsumDense: einsum}
+        saved = {cls: cls.call for cls in rules}
+
+        def wrap(cls, fn):
+            def call(layer, inputs, *args, **kwargs):
+                y = saved[cls](layer, inputs, *args, **kwargs)
+                macs[0] += fn(layer, inputs, y)
+                return y
+            return call
+
         try:
-            tf = setup_tf()
-            from tensorflow.python.framework.convert_to_constants import convert_variables_to_constants_v2_as_graph
-            fn = tf.function(lambda x: self.det(x, training=False))
-            cf = fn.get_concrete_function(tf.TensorSpec([1, self.imgsz, self.imgsz, 3], tf.float32))
-            frozen, _ = convert_variables_to_constants_v2_as_graph(cf)
-            builder = tf.compat.v1.profiler.ProfileOptionBuilder
-            opts = builder(builder.float_operation()).with_empty_output().build()
-            info = tf.compat.v1.profiler.profile(graph=frozen.graph, run_meta=tf.compat.v1.RunMetadata(), cmd='op', options=opts)
-            return info.total_float_ops / 1e9
+            for cls, fn in rules.items():
+                cls.call = wrap(cls, fn)
+            self.det(np.zeros((1, self.imgsz, self.imgsz, 3), 'float32'), training=False)
+            return 2 * macs[0] / 1e9
         except Exception as e:
-            print(f'FLOPs not available for {self.name}: {type(e).__name__}')
+            print(f'FLOPs not available for {self.name}: {type(e).__name__}: {e}')
             return None
+        finally:
+            for cls, call in saved.items():
+                cls.call = call
 
 
 def train(name, redo=False):
@@ -1205,15 +1247,21 @@ def nms(boxes, scores, classes, iou):
     '''Class-wise NMS, returns kept indices sorted by score.'''
     if not len(boxes):
         return np.zeros(0, int)
-    try:
-        import torch
-        import torchvision
-        keep = torchvision.ops.batched_nms(torch.from_numpy(boxes).float(), torch.from_numpy(scores).float(),
-                                           torch.from_numpy(classes).long(), iou)
-        return keep.numpy()
-    except ImportError:
-        pass
+    # Only use a framework that is already loaded (importing torchvision after TF crashes, see setup_tf)
     shifted = boxes + classes[:, None] * (boxes.max() + 1)
+    if 'torchvision' in sys.modules:
+        with contextlib.suppress(ImportError):
+            import torch
+            import torchvision
+            keep = torchvision.ops.batched_nms(torch.from_numpy(boxes).float(), torch.from_numpy(scores).float(),
+                                               torch.from_numpy(classes).long(), iou)
+            return keep.numpy()
+    if 'tensorflow' in sys.modules:
+        tf = sys.modules['tensorflow']
+        with tf.device('/CPU:0'):
+            keep = tf.image.non_max_suppression(shifted.astype('float32')[:, [1, 0, 3, 2]], scores.astype('float32'),
+                                                len(scores), iou_threshold=iou)
+        return keep.numpy().astype(int)
     order, keep = scores.argsort()[::-1], []
     while order.size:
         i = order[0]
@@ -1255,8 +1303,6 @@ def sahi_predict(runner, img, conf):
             ss.append(s)
             cs.append(c)
     b, s, c = np.concatenate(bs), np.concatenate(ss), np.concatenate(cs)
-    with contextlib.suppress(ImportError):
-        import torchvision  # noqa: F401  (import before timing so it is not counted as latency)
     t0 = time.perf_counter()
     keep = nms(b, s, c, sc['merge_iou'])[:CFG['evaluation']['max_det']]
     times['postprocess'] += (time.perf_counter() - t0) * 1e3
@@ -1583,6 +1629,11 @@ def make_report():
                 entry = lat.get(name + ('+sahi' if sahi else ''))
                 if entry:
                     m['latency_ms'], m['gpu'] = entry['latency_ms'], entry['gpu']
+                # A warm-started run also owns the epochs and train time of the run it continued from
+                base = metrics_for(warm_start(name), split) if warm_start(name) else None
+                if base:
+                    m['train_seconds'] = (m.get('train_seconds') or 0) + (base.get('train_seconds') or 0)
+                    m['epochs_trained'] = f'{base.get("epochs_trained")}+{m.get("epochs_trained")}'
                 rows.append(m)
     if not rows:
         print('No evaluated models yet. Recommended: run an experiment first')
@@ -1609,7 +1660,8 @@ def make_report():
                         plot_quality(split), plot_samples(split)) if p]
     text = (f'### SkyScout results\n\nAll models scored on the VisDrone-DET **{split}** split with the same evaluation code. '
             f'Latency measured with batch 1 on: {", ".join(gpus)}.{note} Train time is wall time summed over all sessions, '
-            f'so it depends on the machine each run used.\n\n#### Comparison\n\n' + '\n'.join(md) + '\n\n'
+            f'so it depends on the machine each run used. Runs that continue from another run (like the long D-FINE run) '
+            f'show epochs as setup + extra, and their train time includes the setup run.\n\n#### Comparison\n\n' + '\n'.join(md) + '\n\n'
             + ''.join(f'![{p.stem}](plots/{p.name})\n\n' for p in figs)
             + '#### Per-model details\n\n' + ''.join(f'- [{m["experiment"]}{" + SAHI" if m["sahi"] else ""}]'
                                                    f'({rel(eval_dir(m["experiment"], split, m["sahi"]) / "report.md")[len("results/"):]})\n' for m in rows))
@@ -1689,10 +1741,13 @@ def plot_sahi():
         x = np.arange(len(names))
         for j, (sahi, label) in enumerate([(False, 'full image'), (True, 'SAHI tiles')]):
             vals = [100 * metrics_for(n, split, sahi)[key] for n in names]
-            ax.bar(x + (j - 0.5) * 0.36, vals, 0.36, color=PALETTE[j], edgecolor=SURFACE, linewidth=2, label=label)
+            bars = ax.bar(x + (j - 0.5) * 0.36, vals, 0.36, color=PALETTE[j], edgecolor=SURFACE, linewidth=2, label=label)
+            for r, v in zip(bars, vals):
+                ax.text(r.get_x() + r.get_width() / 2, v, f'{v:.1f}', ha='center', va='bottom', fontsize=8, color=INK2)
         ax.set_xticks(x, names, rotation=15)
         ax.set_title(title, loc='left')
-    axes[0].legend()
+        ax.set_ylim(0, 1.2 * ax.get_ylim()[1])
+        ax.legend(loc='upper left', ncol=2, frameon=False, fontsize=8)
     return _save(fig, PLOTS / 'sahi.png')
 
 
@@ -1728,7 +1783,6 @@ def plot_samples(split):
     coco = load_coco(split)
     files = {im['id']: im['file_name'] for im in coco['images']}
     gts = gt_by_image(coco)
-    conf = CFG['demo']['conf']
     fig, axes = plt.subplots(len(ids), len(names) + 1, figsize=(4 * (len(names) + 1), 3 * len(ids)), squeeze=False)
     for r, iid in enumerate(ids):
         img = read_rgb(split_dir(split) / 'images' / files[iid])
@@ -1737,14 +1791,15 @@ def plot_samples(split):
         for n in names:
             d = metrics_for(n, split)['samples'].get(str(iid))
             if d:
-                panels.append((n, draw_dets(img, np.array(d[0]).reshape(-1, 4), np.array(d[1]), np.array(d[2], int), conf)))
+                panels.append((f'{n} (conf {best_conf(n):.2f})',
+                               draw_dets(img, np.array(d[0]).reshape(-1, 4), np.array(d[1]), np.array(d[2], int), best_conf(n))))
         for c, ax in enumerate(axes[r]):
             ax.axis('off')
             if c < len(panels):
                 ax.imshow(panels[c][1])
                 if r == 0:
                     ax.set_title(panels[c][0], fontsize=10)
-    fig.suptitle(f'Sample predictions (confidence >= {conf})', x=0.02, ha='left')
+    fig.suptitle('Sample predictions (each model at its best-F1 confidence)', x=0.02, ha='left')
     return _save(fig, PLOTS / 'sample_predictions.png')
 
 
@@ -1770,6 +1825,9 @@ def _grouped(ax, groups, series, fmt='{:.1f}'):
         for r, v in zip(bars, vals):
             ax.text(r.get_x() + r.get_width() / 2, v, fmt.format(v), ha='center', va='bottom', fontsize=7, color=INK2)
     ax.set_xticks(x, groups)
+    # headroom so the one-row legend never covers a bar label
+    ax.set_ylim(0, 1.2 * max(max(v) for v in series.values()))
+    ax.legend(loc='upper left', ncol=n, frameon=False, fontsize=8)
 
 
 def plot_main_metrics():
@@ -1784,7 +1842,6 @@ def plot_main_metrics():
     _grouped(ax, [k[1] for k in keys], {lab: [100 * metrics_for(n, split)[k] for k, _ in keys] for n, lab in mm.items()})
     ax.set_ylabel('Score (%)')
     ax.set_title(f'Baseline vs newest YOLO vs fine-tuned D-FINE ({split} split)', loc='left')
-    ax.legend(loc='upper right')
     return _save(fig, PLOTS / 'main_metrics.png')
 
 
@@ -1799,7 +1856,6 @@ def plot_per_class():
     ax.set_ylabel('AP@50 (%)')
     ax.set_title('Per-class AP@50', loc='left')
     ax.tick_params(axis='x', rotation=20)
-    ax.legend(loc='upper right')
     return _save(fig, PLOTS / 'per_class_ap50.png')
 
 
@@ -1824,7 +1880,9 @@ def plot_costs(rows):
         ax.set_xticks(range(len(mm)), [n.split('_')[0] for n in mm])
         ax.set_title(title, loc='left', fontsize=10)
     gpus = sorted({by_name[n]['gpu'] for n in mm})
-    fig.suptitle(f'Computation cost (latency on {", ".join(gpus)}, batch 1)', x=0.02, ha='left')
+    warm = [n for n in mm if warm_start(n)]
+    extra = f'; {", ".join(n.split("_")[0] for n in warm)} train time includes its setup run' if warm else ''
+    fig.suptitle(f'Computation cost (latency on {", ".join(gpus)}, batch 1{extra})', x=0.02, ha='left')
     return _save(fig, PLOTS / 'compute_cost.png')
 
 
@@ -1847,9 +1905,13 @@ def plot_training_curves():
     axes[0].set_xlabel('Epoch')
     for j, (n, p) in enumerate(dfine.items()):
         d = pd.read_csv(p).drop_duplicates('epoch', keep='last')
-        axes[1].plot(d['epoch'] + 1, d['loss'], color=PALETTE[j], linewidth=2, label=f'{n} train')
+        # a warm-started run is drawn after the epochs of the run it continues from
+        base = warm_start(n)
+        start = len(pd.read_csv(dfine[base]).drop_duplicates('epoch')) if base in dfine else 0
+        ep = d['epoch'] + 1 + start
+        axes[1].plot(ep, d['loss'], color=PALETTE[j], linewidth=2, label=f'{n} train')
         if 'val_loss' in d:
-            axes[1].plot(d['epoch'] + 1, d['val_loss'], color=PALETTE[j], linewidth=2, linestyle='--', label=f'{n} val')
+            axes[1].plot(ep, d['val_loss'], color=PALETTE[j], linewidth=2, linestyle='--', label=f'{n} val')
     axes[1].set_title('D-FINE loss per epoch (dashed = val)', loc='left')
     axes[1].set_xlabel('Epoch')
     for ax in axes:
@@ -1882,8 +1944,11 @@ def plot_quality(split=None):
     coco = load_coco(split)
     files = {im['id']: im['file_name'] for im in coco['images']}
     gts = gt_by_image(coco)
-    conf = CFG['demo']['conf']
-    fig, axes = plt.subplots(len(ids), len(mm) + 1, figsize=(4.2 * (len(mm) + 1), 3.4 * len(ids)), squeeze=False)
+    # each model at its own best-F1 confidence: score scales differ (D-FINE scores run higher than YOLO)
+    confs = {n: best_conf(n, split) for n in mm}
+    first = next(im for im in coco['images'] if im['id'] == ids[0])
+    row_h = 4.2 * first['height'] / first['width'] + 0.5
+    fig, axes = plt.subplots(len(ids), len(mm) + 1, figsize=(4.2 * (len(mm) + 1), row_h * len(ids) + 0.4), squeeze=False)
     for r, iid in enumerate(ids):
         img = read_rgb(split_dir(split) / 'images' / files[iid])
         gb, gc = gts[iid]
@@ -1898,14 +1963,15 @@ def plot_quality(split=None):
             d = metrics_for(n, split)['samples'].get(str(iid))
             if d:
                 b, s, c = np.array(d[0]).reshape(-1, 4), np.array(d[1]), np.array(d[2], int)
-                keep = s >= conf
-                panels.append((f'{lab}: {int(inside(b[keep]).sum())} found', draw_dets(img, b[keep], s[keep], c[keep])))
+                keep = s >= confs[n]
+                panels.append((f'{lab}: {int(inside(b[keep]).sum())} found (conf {confs[n]:.2f})',
+                               draw_dets(img, b[keep], s[keep], c[keep])))
         for c, ax in enumerate(axes[r]):
             ax.axis('off')
             if c < len(panels):
                 ax.imshow(panels[c][1][y1:y2, x1:x2])
                 ax.set_title(panels[c][0], fontsize=9)
-    fig.suptitle(f'Zoomed view of dense test images (confidence >= {conf}, box color = class)', x=0.02, ha='left')
+    fig.suptitle('Zoomed view of dense test images (each model at its best-F1 confidence, box color = class)', x=0.02, ha='left')
     return _save(fig, PLOTS / 'quality_zoom.png')
 
 
@@ -1966,6 +2032,10 @@ def run_all(isolate=None):
             continue
         if isolate:
             ok = run_child('run', name)
+            if not ok:
+                # one retry from the last checkpoint, for one-off GPU driver errors
+                log(f'{name}: retrying once from the last checkpoint')
+                ok = run_child('run', name)
         else:
             try:
                 run_experiment(name)
@@ -2054,7 +2124,11 @@ def model_card(name):
     m, meta = metrics_for(name, split), read_json(MODELS / f'{name}.json', {})
     if not m:
         return f'`{name}` has no saved evaluation yet. Recommended: run `python skyscout.py eval {name}`'
-    lat = m['latency_ms']
+    # same numbers as the report: one-GPU latency, and train time including the run it continued from
+    entry = read_json(RESULTS / 'latency.json', {}).get(name)
+    lat, m['gpu'] = (entry['latency_ms'], entry['gpu']) if entry else (m['latency_ms'], m['gpu'])
+    if warm_start(name):
+        meta['train_seconds'] = (meta.get('train_seconds') or 0) + (read_json(MODELS / f'{warm_start(name)}.json', {}).get('train_seconds') or 0)
     return (f'**{name}** ({m["family"]}, {m["setup"]}, {m["imgsz"]} px) scored on the {split} split: '
             f'mAP@50-95 **{100 * m["map50_95"]:.1f}%**, mAP@50 {100 * m["map50"]:.1f}%, AP small {100 * m["ap_small"]:.1f}%, '
             f'precision {100 * m["precision"]:.1f}%, recall {100 * m["recall"]:.1f}%, F1 {100 * m["f1"]:.1f}%. '
@@ -2144,7 +2218,8 @@ def launch_demo(name=None, share=None):
                     'test-set evaluation, this page is for trying the models out.')
         with gr.Row():
             model = gr.Dropdown(choices, value=default, label='Model', scale=2)
-            conf = gr.Slider(0.05, 0.95, value=dc['conf'], step=0.05, label='Confidence threshold', scale=2)
+            conf = gr.Slider(0.05, 0.95, value=best_conf(default), step=0.01, scale=2,
+                             label='Confidence threshold (starts at the best-F1 value of each model)')
             tiles = gr.Checkbox(label='Tiled inference (SAHI), slower but finds smaller objects', scale=1)
         card = gr.Markdown(model_card(default))
         gr.HTML(f'<div style="font-size:0.9em">Box colors: {legend}</div>')
@@ -2169,7 +2244,7 @@ def launch_demo(name=None, share=None):
                                        x_title='Time (s)', y_title='Count')
             if videos:
                 gr.Examples([[str(v)] for v in videos], inputs=[vid_in], label='Sample videos')
-        model.change(model_card, model, card)
+        model.change(lambda n: (model_card(n), best_conf(n)), model, [card, conf])
         img_btn.click(on_image, [img_in, model, conf, tiles], [img_out, img_table, img_info])
         vid_btn.click(on_video, [vid_in, model, conf, tiles], [vid_out, vid_table, vid_plot, vid_info])
     share = (PROFILE == 'colab') if share is None else share

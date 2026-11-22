@@ -1,0 +1,11 @@
+{
+  "started": "2026-11-21 22:50:38",
+  "sessions": 1,
+  "elapsed_s": 118.8,
+  "step": "eval_dfine_best_25_val",
+  "status": "done",
+  "profile": "local",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "updated": "2026-11-21 22:52:37",
+  "finished": "2026-11-21 22:52:37"
+}

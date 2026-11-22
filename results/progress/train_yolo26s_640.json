@@ -1,0 +1,16 @@
+{
+  "started": "2026-11-21 05:23:57",
+  "sessions": 1,
+  "elapsed_s": 5772.0,
+  "step": "train_yolo26s_640",
+  "status": "done",
+  "profile": "local",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "updated": "2026-11-21 07:10:10",
+  "epoch": 50,
+  "epochs": 50,
+  "val_map50_95": 0.2334,
+  "cooldown_since": null,
+  "cooldown_s": 601,
+  "finished": "2026-11-21 07:10:10"
+}

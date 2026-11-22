@@ -1,0 +1,17 @@
+{
+  "started": "2026-11-21 09:21:03",
+  "sessions": 1,
+  "elapsed_s": 9063.0,
+  "step": "train_dfine_full_640",
+  "status": "done",
+  "profile": "local",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "updated": "2026-11-21 12:02:07",
+  "epoch": 6,
+  "epochs": 6,
+  "loss": 11.584193229675293,
+  "val_loss": 11.237879753112793,
+  "cooldown_since": null,
+  "cooldown_s": 601,
+  "finished": "2026-11-21 12:02:07"
+}

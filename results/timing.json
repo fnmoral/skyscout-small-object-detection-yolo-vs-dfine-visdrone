@@ -1,0 +1,18 @@
+{
+  "yolo11s_640@local": {
+    "epoch_min": 1.6,
+    "epochs": 100,
+    "batch": 8,
+    "total_hours": 2.7,
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "measured": "2026-11-21 01:42:34"
+  },
+  "dfine_full_640@local": {
+    "epoch_min": 27.9,
+    "epochs": 30,
+    "batch": 4,
+    "total_hours": 14.0,
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "measured": "2026-11-21 02:16:17"
+  }
+}

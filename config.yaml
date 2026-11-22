@@ -124,7 +124,7 @@ report:
     - [best, dfine_best_1024]
 
 demo:
-  conf: 0.3
+  conf: 0.3             # fallback only, each model starts at its saved best-F1 confidence
   server_port: 7860
   video_max_frames: 300   # Recommended: keep demo videos short, longer clips are cut here
   video_stride: 1         # 2 = run on every second frame
