@@ -1,6 +1,6 @@
 {
   "yolo11s_640": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:20:47",
     "n_images": 200,
@@ -12,7 +12,7 @@
     }
   },
   "yolo11s_640+sahi": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:21:06",
     "n_images": 200,
@@ -24,7 +24,7 @@
     }
   },
   "yolo26s_640": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:21:12",
     "n_images": 200,
@@ -36,7 +36,7 @@
     }
   },
   "yolo26s_640+sahi": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:21:32",
     "n_images": 200,
@@ -48,7 +48,7 @@
     }
   },
   "dfine_frozen_640": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:22:33",
     "n_images": 200,
@@ -60,7 +60,7 @@
     }
   },
   "dfine_full_640": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:23:19",
     "n_images": 200,
@@ -72,7 +72,7 @@
     }
   },
   "dfine_llrd_640": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:24:05",
     "n_images": 200,
@@ -84,7 +84,7 @@
     }
   },
   "dfine_best_50": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:28:02",
     "n_images": 200,
@@ -96,7 +96,7 @@
     }
   },
   "dfine_best_25": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:27:16",
     "n_images": 200,
@@ -108,7 +108,7 @@
     }
   },
   "dfine_best_long_640": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:24:52",
     "n_images": 200,
@@ -120,7 +120,7 @@
     }
   },
   "dfine_best_long_640+sahi": {
-    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu": "local GPU",
     "profile": "local",
     "measured": "2026-11-22 00:26:29",
     "n_images": 200,

@@ -17,6 +17,32 @@ flowchart LR
     C --> D[Count per class<br/>e.g. 42 cars, 17 pedestrians]
 ```
 
+#### The main question
+
+**Which finds small objects in drone photos better: a transformer detector or a CNN detector, and what does each one cost in speed and training time?**
+
+- CNN side: YOLO11s (baseline) and YOLO26s (newest YOLO)
+- Transformer side: D-FINE Small
+
+D-FINE is not a pure transformer. It still uses a CNN backbone to pull features out of the image, then uses transformer attention and object queries to find the objects. "Transformer-based" means the part that does the detecting works with attention, while YOLO does that part with convolutions only.
+
+Around the main question, the project also answers some smaller ones:
+
+| Part | Question |
+|---|---|
+| Old vs new YOLO | Does YOLO26s improve on the YOLO11s baseline? |
+| D-FINE fine-tuning setups | Is it better to freeze the backbone, train everything, or train everything with smaller learning rates for early layers? |
+| SAHI tiling | Does cutting the photo into tiles help both kinds of model find small objects? |
+| Data efficiency | How much does D-FINE need all of the training data? |
+| Input size | Does a bigger input (1024 vs 640 px) help? (needs the school server, not done yet) |
+
+Short answer from the first run (details in [Results](#results-first-full-run)):
+
+- Small objects: the transformer (D-FINE) is best, AP small 8.8 vs 7.5 (YOLO11s) and 8.2 (YOLO26s)
+- Overall accuracy: the newest CNN (YOLO26s) is slightly ahead, mAP@50-95 17.5 vs 17.2 (D-FINE) and 16.6 (YOLO11s)
+- Speed and training: the CNNs are about 6 times faster and train much quicker
+- SAHI tiles help both kinds of model on small objects, the YOLOs a bit more
+
 #### The three detectors
 
 | Model | Type in plain words | Why it is here |
@@ -28,15 +54,18 @@ flowchart LR
 All three are about the same size (around 10 million parameters), so the comparison is fair.
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph YOLO["YOLO11s (CNN)"]
+        direction TB
         y1[Image] --> y2[CNN backbone] --> y3[Many candidate boxes] --> y4[NMS removes duplicates] --> y5[Final boxes]
     end
     subgraph Y26["YOLO26s (CNN, NMS-free)"]
+        direction TB
         n1[Image] --> n2[CNN backbone] --> n3[One box per object] --> n5[Final boxes]
     end
     subgraph DF["D-FINE (transformer)"]
-        d1[Image] --> d2[CNN backbone] --> d3[Transformer encoder] --> d4[Decoder with 300 object queries] --> d5[Final boxes]
+        direction TB
+        d1[Image] --> d2[CNN backbone] --> d3[Transformer encoder] --> d4[Decoder with<br/>300 object queries] --> d5[Final boxes]
     end
 ```
 
@@ -106,9 +135,9 @@ Every report also says how long training and evaluation took. The final comparis
 
 FLOPs are counted the same way for every model: 2 x the multiply-adds of all conv and linear layers for one 640 x 640 image (Ultralytics does this for YOLO, SkyScout does it for D-FINE by running one image through the model and reading each layer's real shapes).
 
-#### Results (first run on a laptop GPU)
+#### Results (first full run)
 
-All 640 px runs were trained on one laptop GPU with shorter schedules (YOLO 50 epochs, D-FINE setups 6 epochs, then 10 more for the best setup). Scores are on the 1,610 test-dev images, latency is batch 1 on that same GPU.
+All 640 px runs were trained on one local GPU with shorter schedules (YOLO 50 epochs, D-FINE setups 6 epochs, then 10 more for the best setup). Scores are on the 1,610 test-dev images, latency is batch 1 on that same GPU.
 
 | Model | mAP@50 | mAP@50-95 | AP small | Params (M) | GFLOPs | Latency (ms) | Train time (h) |
 |---|---|---|---|---|---|---|---|
@@ -132,7 +161,28 @@ What we found:
 
 ![Zoomed comparison](results/plots/quality_zoom.png)
 
-Demo screenshots of the same test image with each model are in `results/screenshots/`.
+#### Side-by-side pictures
+
+`python skyscout.py compare` runs the three main models on 6 busy test images (one per scene) and saves the figures in `results/compare/`. Each model uses its own best-F1 confidence, because D-FINE scores run higher than YOLO scores.
+
+| File | What it shows |
+|---|---|
+| `compare_1.png` ... `compare_6.png` | One test image: ground truth, YOLO11s, YOLO26s, D-FINE. Full image on top, zoomed busy area below, with object counts |
+| `sahi_1.png` ... `sahi_6.png` | The zoomed area for each model, full image vs SAHI tiles |
+| `compare_grid.png` | All 6 zoomed areas in one picture |
+
+![All six test images](results/compare/compare_grid.png)
+
+![SAHI on a crowded square](results/compare/sahi_1.png)
+
+Demo screenshots of the same photo with each model (`results/screenshots/`):
+
+| YOLO11s (baseline) | YOLO26s (newest YOLO) | D-FINE (fine-tuned) |
+|---|---|---|
+| ![](results/screenshots/demo_street_yolo11s_640.png) | ![](results/screenshots/demo_street_yolo26s_640.png) | ![](results/screenshots/demo_street_dfine_best_long_640.png) |
+| ![](results/screenshots/demo_crowd_yolo11s_640.png) | ![](results/screenshots/demo_crowd_yolo26s_640.png) | ![](results/screenshots/demo_crowd_dfine_best_long_640.png) |
+
+What the pictures show: in the very crowded square both YOLOs hit their 300-box limit while D-FINE finds fewer people, but SAHI tiles close most of that gap for D-FINE (70 to 116 people in the zoomed area). On streets with cars and scooters D-FINE often finds the most objects.
 
 #### Files
 
@@ -145,7 +195,8 @@ Demo screenshots of the same test image with each model are in `results/screensh
 | `downloads/` | Dataset and pretrained weights (downloaded once, never again) |
 | `runs/` | Training checkpoints and logs |
 | `models/` | Final fine-tuned models |
-| `results/` | Metrics, tables, plots, `STATUS.md` and `log.txt` |
+| `results/` | Metrics, tables, plots (`plots/`), side-by-side figures (`compare/`), demo screenshots (`screenshots/`), `STATUS.md` and `log.txt` |
+| `samples/` | 6 test images and a short clip from VisDrone2019-DET test-dev, so the demo works without the dataset |
 
 #### How to run
 
@@ -178,6 +229,8 @@ python skyscout.py time dfine_full_640
 python skyscout.py eval yolo26s_640 --split test --sahi
 python skyscout.py latency         # time every saved model again on this machine's GPU
 python skyscout.py report
+python skyscout.py compare         # side-by-side figures of the main models
+python skyscout.py pack            # zip the demo models to share (see "Try the trained models")
 python skyscout.py demo
 ```
 `all` starts each experiment in its own Python process, so TensorFlow and PyTorch never fight over GPU memory, and one failed run does not stop the rest.
@@ -186,7 +239,7 @@ Recommended: if the server has more than one GPU, pick a free one with `CUDA_VIS
 
 **Own Windows PC**
 
-TensorFlow cannot use the GPU on plain Windows, so D-FINE is trained inside WSL2 (Ubuntu), which the code treats as the `local` profile. This profile uses shorter training (YOLO 50 epochs, D-FINE 6 epochs per setup) so everything fits on one laptop GPU in about a day, and it takes cooling breaks:
+TensorFlow cannot use the GPU on plain Windows, so D-FINE is trained inside WSL2 (Ubuntu), which the code treats as the `local` profile. This profile uses shorter training (YOLO 50 epochs, D-FINE 6 epochs per setup) so everything fits on one consumer GPU in about a day, and it takes cooling breaks:
 
 ```mermaid
 flowchart LR
@@ -226,10 +279,41 @@ flowchart LR
 
 - **Image:** boxes drawn in a color per class, a table with the count and average confidence per class, and how long it took.
 - **Video:** the video comes back with boxes, plus the average and highest count per class and a line chart of objects over time. Counts are per frame (no tracking), so a car seen in 10 frames counts 10 times.
-- A short sample clip is built from one VisDrone test-dev sequence the first time. Put any other `.mp4` in `downloads/samples/` and it shows up as an example too.
+- Sample photos and a short clip (one VisDrone test-dev sequence) are in `samples/`. Put any other `.mp4` in `downloads/samples/` and it shows up as an example too.
+- The confidence slider starts at the best-F1 value of the chosen model.
 - Turn on tiled inference (SAHI) to find even smaller objects, at the cost of speed.
 
 Recommended: on the school server, open the demo through an SSH tunnel (`ssh -L 7860:localhost:7860 ...`) and go to `http://localhost:7860`.
+
+#### Try the trained models on Google Colab
+
+You do not need the dataset or any training to try the models, only the trained weights in one zip file, `skyscout_models.zip` (YOLO11s, YOLO26s and the fine-tuned D-FINE, about 80 MB). Whoever trained the models makes it with `python skyscout.py pack` (it lands in `downloads/`). If `demo.models_url` in `config.yaml` has a download link, the notebook gets the zip by itself.
+
+```mermaid
+flowchart LR
+    A[Open SkyScout.ipynb<br/>on a Colab GPU] --> B[1. Setup cell<br/>clones repo, installs packages]
+    B --> C[11. Demo cell<br/>unzips models, starts the app]
+    C --> D[Open the public<br/>gradio.live link]
+```
+
+**Way 1: Colab in the browser**
+
+1. Upload `skyscout_models.zip` to your Google Drive, for example as `MyDrive/skyscout_models.zip` (skip this if `demo.models_url` is set).
+2. Open `SkyScout.ipynb` in Colab (File > Open notebook > GitHub, paste this repo's link) and choose Runtime > Change runtime type > T4 GPU.
+3. Run **1. Setup**. Allow the Drive access when asked. It clones the repo into `MyDrive/SkyScout` and installs the packages. Recommended: if it says TensorFlow was upgraded, use Runtime > Restart session and run it again.
+4. Go to **11. Demo** and run it. If you uploaded the zip, change the first line to `sk.fetch_models('/content/drive/MyDrive/skyscout_models.zip')`.
+5. Open the app: it shows up right under the cell, and a public link like `https://xxxx.gradio.live` is printed. The link works in any browser tab or on a phone for about a week, or until the Colab session stops.
+
+**Way 2: VS Code connected to a Colab runtime**
+
+1. In VS Code, install the **Google Colab** extension (by Google) and open `SkyScout.ipynb`.
+2. Click **Select Kernel** (top right) > **Colab** > **New Colab Server**, pick a **GPU** (T4) and sign in with your Google account. The cells now run on a Colab machine, not on your computer.
+3. In the setup cell, set `USE_DRIVE = False` if Drive cannot be mounted from VS Code. The repo then goes into `/content/SkyScout` for this session only.
+4. Get the models onto the Colab machine: easiest is a download link in `demo.models_url` (or `sk.fetch_models('https://...')`). Recommended: put `skyscout_models.zip` on a GitHub release of your copy of the repo and use that link.
+5. Run **1. Setup**, then **11. Demo**.
+6. Open the printed `https://xxxx.gradio.live` link in your browser. The `http://127.0.0.1:7860` link points to the Colab machine, so it does not open on your computer.
+
+Stop the app with the stop button of the cell (or Runtime > Interrupt execution). Running the demo cell again closes the old app first.
 
 #### A note on D-FINE in KerasHub
 

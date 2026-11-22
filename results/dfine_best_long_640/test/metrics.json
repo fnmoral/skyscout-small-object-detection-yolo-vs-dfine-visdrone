@@ -18,7 +18,7 @@
   "n_images": 1610,
   "params": 10260177,
   "gflops": 27.0534272,
-  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "gpu": "local GPU",
   "profile": "local",
   "evaluated": "2026-11-21 23:56:20",
   "latency_ms": {
@@ -29,7 +29,7 @@
   },
   "eval_seconds": 192.3,
   "train_seconds": 15787.7,
-  "train_gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "train_gpu": "local GPU",
   "epochs_trained": 10,
   "per_class": [
     {

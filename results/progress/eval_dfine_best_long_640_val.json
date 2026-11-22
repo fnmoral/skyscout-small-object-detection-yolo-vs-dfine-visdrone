@@ -5,7 +5,7 @@
   "step": "eval_dfine_best_long_640_val",
   "status": "done",
   "profile": "local",
-  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "gpu": "local GPU",
   "updated": "2026-11-21 23:51:58",
   "finished": "2026-11-21 23:51:58"
 }

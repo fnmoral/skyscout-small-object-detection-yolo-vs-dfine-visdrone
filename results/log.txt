@@ -1,6 +1,6 @@
 [2026-11-21 01:42:34] [local] yolo11s_640: about 1.6 min per epoch, 2.7 h for 100 epochs
 [2026-11-21 02:16:17] [local] dfine_full_640: about 27.9 min per epoch, 14.0 h for 30 epochs
-[2026-11-21 03:56:22] [local] run_all started on local (NVIDIA GeForce RTX 3060 Laptop GPU)
+[2026-11-21 03:56:22] [local] run_all started on local (local GPU)
 [2026-11-21 03:56:23] [local] train_yolo11s_640: running
 [2026-11-21 04:59:56] [local] cooldown break: 61 min of training, pausing 10 min (until the GPU is under 60 C)
 [2026-11-21 05:09:57] [local] cooldown break over after 10.0 min (GPU at 38 C)
@@ -82,7 +82,7 @@
 [2026-11-21 19:02:26] [local] sahi_yolo26s_640: done after 4.3 min
 [2026-11-21 19:07:05] [local] latency table: 8 entries in results/latency.json
 [2026-11-21 19:07:14] [local] run_all finished in 15.2 h, failed: dfine_best_long_640, dfine_best_25
-[2026-11-21 19:07:48] [local] run_all started on local (NVIDIA GeForce RTX 3060 Laptop GPU)
+[2026-11-21 19:07:48] [local] run_all started on local (local GPU)
 [2026-11-21 19:07:49] [local] train_dfine_best_long_640: running
 [2026-11-21 19:11:24] [local] train_dfine_best_long_640: failed after 1.8 h
 [2026-11-21 19:11:39] [local] run dfine_best_long_640 stopped with exit code 1, see results/STATUS.md
@@ -91,7 +91,7 @@
 [2026-11-21 19:20:10] [local] run dfine_best_25 stopped with exit code 1, see results/STATUS.md
 [2026-11-21 19:20:37] [local] latency table: 8 entries in results/latency.json
 [2026-11-21 19:20:45] [local] run_all finished in 12.9 min, failed: dfine_best_long_640, dfine_best_25
-[2026-11-21 19:21:00] [local] run_all started on local (NVIDIA GeForce RTX 3060 Laptop GPU)
+[2026-11-21 19:21:00] [local] run_all started on local (local GPU)
 [2026-11-21 19:21:00] [local] train_dfine_best_long_640: running
 [2026-11-21 19:36:11] [local] run dfine_best_long_640 stopped with exit code -6, see results/STATUS.md
 [2026-11-21 19:36:11] [local] dfine_best_long_640: retrying once from the last checkpoint
@@ -113,7 +113,7 @@
 [2026-11-21 22:57:07] [local] eval_dfine_best_25_test: done after 4.5 min
 [2026-11-21 22:58:16] [local] latency table: 9 entries in results/latency.json
 [2026-11-21 22:58:21] [local] run_all finished in 3.6 h, failed: dfine_best_long_640
-[2026-11-21 22:59:05] [local] run_all started on local (NVIDIA GeForce RTX 3060 Laptop GPU)
+[2026-11-21 22:59:05] [local] run_all started on local (local GPU)
 [2026-11-21 22:59:05] [local] train_dfine_best_long_640: running
 [2026-11-21 23:49:58] [local] dfine_best_long_640: saved fine-tuned model to models/dfine_best_long_640.weights.h5
 [2026-11-21 23:50:04] [local] train_dfine_best_long_640: done after 4.4 h
@@ -133,3 +133,6 @@
 [2026-11-22 00:12:37] [local] sahi_dfine_best_long_640: done after 10.9 min
 [2026-11-22 00:20:13] [local] latency table: 11 entries in results/latency.json
 [2026-11-22 00:28:03] [local] latency table: 11 entries in results/latency.json
+[2026-11-22 07:03:13] [local] comparison figures: 13 in results/compare
+[2026-11-22 07:03:17] [local] samples: 6 images and visdrone_testdev_clip.mp4 in samples
+[2026-11-22 07:07:06] [local] packed 3 models into downloads/skyscout_models.zip (82 MB)

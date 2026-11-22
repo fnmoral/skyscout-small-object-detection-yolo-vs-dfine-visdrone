@@ -5,7 +5,7 @@
   "step": "train_dfine_full_640",
   "status": "done",
   "profile": "local",
-  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "gpu": "local GPU",
   "updated": "2026-11-21 12:02:07",
   "epoch": 6,
   "epochs": 6,

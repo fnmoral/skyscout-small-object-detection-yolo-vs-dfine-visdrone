@@ -5,7 +5,7 @@
   "step": "train_yolo26s_640",
   "status": "done",
   "profile": "local",
-  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "gpu": "local GPU",
   "updated": "2026-11-21 07:10:10",
   "epoch": 50,
   "epochs": 50,

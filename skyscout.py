@@ -7,6 +7,9 @@ Terminal usage:
     python skyscout.py eval yolo11s_640 --split test --sahi
     python skyscout.py time dfine_full_640
     python skyscout.py report
+    python skyscout.py compare     (side-by-side figures of the main models)
+    python skyscout.py samples     (test images + clip into samples/ for the demo)
+    python skyscout.py pack        (zip the demo models to share, fetch downloads them again)
     python skyscout.py demo
 
 All settings live in config.yaml. Every step writes its state to results/progress so a run can
@@ -49,6 +52,8 @@ MODELS = ROOT / 'models'
 RESULTS = ROOT / 'results'
 PROGRESS = RESULTS / 'progress'
 PLOTS = RESULTS / 'plots'
+COMPARE = RESULTS / 'compare'
+SAMPLES = ROOT / 'samples'   # a few test images and a short clip kept in git, so the demo works without the dataset
 os.environ.setdefault('KAGGLEHUB_CACHE', str(DOWNLOADS / 'kagglehub'))
 
 # Validated categorical palette (fixed order) plus text and grid tokens for plots
@@ -184,6 +189,9 @@ def gpu_name():
     except (OSError, subprocess.SubprocessError):
         if 'torch' in sys.modules and sys.modules['torch'].cuda.is_available():
             name = sys.modules['torch'].cuda.get_device_name(0)
+    # a profile can hide the exact GPU model in every saved result (public repos)
+    if name != 'cpu' and PROF.get('device_label'):
+        name = PROF['device_label']
     _GPU.append(name)
     return name
 
@@ -1975,6 +1983,160 @@ def plot_quality(split=None):
     return _save(fig, PLOTS / 'quality_zoom.png')
 
 
+def compare_ids(split=None):
+    '''Busy test images for side-by-side figures: one per scene sequence, picked with the fixed seed.'''
+    split = split or CFG['evaluation']['report_split']
+    coco, rc = load_coco(split), CFG['report']
+    counts = defaultdict(int)
+    for a in coco['annotations']:
+        counts[a['image_id']] += 1
+    best = {}
+    for im in coco['images']:
+        seq, n = im['file_name'].split('_')[0], counts[im['id']]
+        if n >= rc['compare_min_objects'] and n > best.get(seq, (0, 0))[1]:
+            best[seq] = (im['id'], n)
+    ids = sorted(i for i, _ in best.values())
+    rng = np.random.default_rng(CFG['seed'])
+    return sorted(rng.choice(ids, min(rc['compare_images'], len(ids)), replace=False).tolist())
+
+
+def make_comparisons(split=None):
+    '''Side-by-side figures of the main models on the same test images (run live), saved to results/compare/.'''
+    split = split or CFG['evaluation']['report_split']
+    mm, ids = main_models(split), compare_ids(split)
+    if len(mm) < 2 or not ids:
+        print('Recommended: evaluate the main models first')
+        return []
+    coco = load_coco(split)
+    info = {im['id']: im for im in coco['images']}
+    gts = gt_by_image(coco)
+    imgs = {i: read_rgb(split_dir(split) / 'images' / info[i]['file_name']) for i in ids}
+    dets = {}
+    # one model at a time, freed after use so only one is in GPU memory
+    for n in mm:
+        runner, conf = load_runner(n), best_conf(n, split)
+        for i in ids:
+            dets[n, i, False] = runner.predict([imgs[i]], conf)[0][0]
+            dets[n, i, True] = sahi_predict(runner, imgs[i], conf)[0]
+        _RUNNERS.pop(n, None)
+        free_gpu()
+    plt = _plt()
+    out = []
+
+    def panels(i, sahi=False):
+        gb, gc = gts[i]
+        ps = [(f'ground truth: {len(gb)} objects', draw_dets(imgs[i], gb, np.ones(len(gc)), gc), gb)]
+        for n, lab in mm.items():
+            b, s, c = dets[n, i, sahi]
+            ps.append((f'{lab}: {len(b)} found', draw_dets(imgs[i], b, s, c), b))
+        return ps
+
+    def zoom_title(title, boxes, win):
+        x1, y1, x2, y2 = win
+        cx, cy = (boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2
+        k = int(((cx >= x1) & (cx < x2) & (cy >= y1) & (cy < y2)).sum())
+        return title.split(':')[0] + f': {k} in this crop'
+
+    confs = ', '.join(f'{lab.split(" ")[0]} {best_conf(n, split):.2f}' for n, lab in mm.items())
+    for k, i in enumerate(ids, 1):
+        h, w = imgs[i].shape[:2]
+        win = dense_crop(gts[i][0], h, w)
+        ps = panels(i)
+        cols, ph = len(ps), 4.6 * h / w
+        fig, axes = plt.subplots(2, cols, figsize=(4.6 * cols, 2 * ph + 1.2), squeeze=False)
+        for c, (title, im, boxes) in enumerate(ps):
+            axes[0, c].imshow(im)
+            axes[0, c].set_title(title, fontsize=10)
+            x1, y1, x2, y2 = win
+            axes[1, c].imshow(im[y1:y2, x1:x2])
+            axes[1, c].set_title(zoom_title(title, boxes, win), fontsize=9, color=INK2)
+            for r in (0, 1):
+                axes[r, c].axis('off')
+        fig.suptitle(f'{info[i]["file_name"]}: full image (top) and zoomed busy area (bottom). Confidence: {confs}',
+                     x=0.01, ha='left', fontsize=11)
+        out.append(_save(fig, COMPARE / f'compare_{k}.png'))
+        # SAHI on vs off for each model, zoomed crop only
+        fig, axes = plt.subplots(len(mm), 2, figsize=(10, len(mm) * 5 * (win[3] - win[1]) / (win[2] - win[0]) + 1), squeeze=False)
+        for r, (n, lab) in enumerate(mm.items()):
+            for c, sahi in enumerate((False, True)):
+                b, s, cl = dets[n, i, sahi]
+                x1, y1, x2, y2 = win
+                axes[r, c].imshow(draw_dets(imgs[i], b, s, cl)[y1:y2, x1:x2])
+                axes[r, c].set_title(zoom_title(f'{lab}{" + SAHI" if sahi else ""}: ', b, win), fontsize=10)
+                axes[r, c].axis('off')
+        fig.suptitle(f'{info[i]["file_name"]}: full image (left) vs SAHI tiles (right), ground truth has '
+                     f'{zoom_title("x: ", gts[i][0], win).split(": ")[1]}', x=0.01, ha='left', fontsize=11)
+        out.append(_save(fig, COMPARE / f'sahi_{k}.png'))
+    # every image in one grid: zoomed crops, ground truth then each model
+    cols = len(mm) + 1
+    fig, axes = plt.subplots(len(ids), cols, figsize=(4.2 * cols, 2.9 * len(ids) + 0.6), squeeze=False)
+    for r, i in enumerate(ids):
+        win = dense_crop(gts[i][0], *imgs[i].shape[:2])
+        x1, y1, x2, y2 = win
+        for c, (title, im, boxes) in enumerate(panels(i)):
+            axes[r, c].imshow(im[y1:y2, x1:x2])
+            axes[r, c].set_title(zoom_title(title, boxes, win), fontsize=9)
+            axes[r, c].axis('off')
+    fig.suptitle(f'Zoomed busy areas of {len(ids)} test images (confidence: {confs}, box color = class)', x=0.01, ha='left')
+    out.append(_save(fig, COMPARE / 'compare_grid.png'))
+    log(f'comparison figures: {len(out)} in {rel(COMPARE)}')
+    return out
+
+
+def export_samples(split=None):
+    '''Copy the comparison test images and a small sample clip into samples/ so the demo works without the dataset.'''
+    split = split or CFG['evaluation']['report_split']
+    SAMPLES.mkdir(parents=True, exist_ok=True)
+    files = {im['id']: im['file_name'] for im in load_coco(split)['images']}
+    for i in compare_ids(split):
+        shutil.copy2(split_dir(split) / 'images' / files[i], SAMPLES / files[i])
+    dc, clip = CFG['demo'], sample_clip()
+    import imageio.v2 as iio
+    with video_writer(SAMPLES / clip.name, dc['clip_fps']) as w:
+        for frame in iio.get_reader(str(clip)):
+            w.append_data(even_resize(frame, dc['samples_clip_width']))
+    log(f'samples: {len(list(SAMPLES.glob("*.jpg")))} images and {clip.name} in {rel(SAMPLES)}')
+
+
+def pack_models():
+    '''Zip the demo models (config demo.pack_models) for sharing. D-FINE is saved without optimizer state (about 3x smaller).'''
+    names = [resolve_name(n) for n in CFG['demo']['pack_models']]
+    out = DOWNLOADS / 'skyscout_models.zip'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DOWNLOADS / 'pack_tmp'
+    tmp.mkdir(exist_ok=True)
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_STORED) as z:
+        for n in names:
+            src = model_path(n)
+            if experiment(n)['family'] == 'dfine':
+                small = tmp / src.name
+                load_runner(n).det.save_weights(str(small))
+                _RUNNERS.pop(n, None)
+                src = small
+            z.write(src, f'models/{model_path(n).name}')
+            z.write(MODELS / f'{n}.json', f'models/{n}.json')
+    shutil.rmtree(tmp, ignore_errors=True)
+    log(f'packed {len(names)} models into {rel(out)} ({out.stat().st_size / 1e6:.0f} MB)')
+    return out
+
+
+def fetch_models(url=None):
+    '''Unzip the shared demo models into models/ when they are missing. url is a link or a path to the zip
+    (for example on Drive), else SKYSCOUT_MODELS_URL, else demo.models_url.'''
+    names = [resolve_name(n) for n in CFG['demo']['pack_models']]
+    if all(n and model_path(n).exists() for n in names):
+        return MODELS
+    url = url or os.environ.get('SKYSCOUT_MODELS_URL') or CFG['demo'].get('models_url')
+    if not url:
+        print('No trained models found. Recommended: copy them into models/ or set demo.models_url in config.yaml')
+        return None
+    zpath = Path(url) if Path(url).exists() else download(url, DOWNLOADS / 'skyscout_models.zip')
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(ROOT)
+    print(f'Models ready: {", ".join(n for n in names if model_path(n).exists())}')
+    return MODELS
+
+
 # Pipeline
 
 def run_experiment(name, redo=False, anywhere=False):
@@ -2111,29 +2273,38 @@ def sample_videos():
             download(url, folder / Path(url.split('?')[0]).name)
         except Exception as e:
             print(f'Sample video not downloaded ({type(e).__name__}): {url}')
-    try:
-        sample_clip()
-    except Exception as e:
-        print(f'Sample clip not made ({type(e).__name__}: {e})')
-    return sorted(p for p in folder.glob('*.mp4') if p.name != 'clip_tmp.mp4')
+    kept = sorted(SAMPLES.glob('*.mp4'))
+    if not kept:
+        try:
+            sample_clip()
+        except Exception as e:
+            print(f'Sample clip not made ({type(e).__name__}: {e})')
+    # the clip in samples/ is a smaller copy, so a same-named one in downloads/samples is skipped
+    extra = [p for p in folder.glob('*.mp4') if p.name != 'clip_tmp.mp4' and p.name not in {k.name for k in kept}]
+    return kept + sorted(extra)
 
 
 def model_card(name):
     '''Saved test-set scores for the selected model (the demo does not re-evaluate).'''
     split = CFG['evaluation']['report_split']
-    m, meta = metrics_for(name, split), read_json(MODELS / f'{name}.json', {})
+    m = metrics_for(name, split)
     if not m:
         return f'`{name}` has no saved evaluation yet. Recommended: run `python skyscout.py eval {name}`'
     # same numbers as the report: one-GPU latency, and train time including the run it continued from
     entry = read_json(RESULTS / 'latency.json', {}).get(name)
     lat, m['gpu'] = (entry['latency_ms'], entry['gpu']) if entry else (m['latency_ms'], m['gpu'])
+    # read from saved results (in git), so it also works when only the demo models were downloaded
+    train_s = m.get('train_seconds') or 0
     if warm_start(name):
-        meta['train_seconds'] = (meta.get('train_seconds') or 0) + (read_json(MODELS / f'{warm_start(name)}.json', {}).get('train_seconds') or 0)
+        train_s += (metrics_for(warm_start(name), split) or {}).get('train_seconds') or 0
     return (f'**{name}** ({m["family"]}, {m["setup"]}, {m["imgsz"]} px) scored on the {split} split: '
             f'mAP@50-95 **{100 * m["map50_95"]:.1f}%**, mAP@50 {100 * m["map50"]:.1f}%, AP small {100 * m["ap_small"]:.1f}%, '
             f'precision {100 * m["precision"]:.1f}%, recall {100 * m["recall"]:.1f}%, F1 {100 * m["f1"]:.1f}%. '
             f'{m["params"] / 1e6:.1f}M parameters, {lat["total"]:.0f} ms per image on {m["gpu"]}. '
-            f'Trained for {fmt_dur(meta.get("train_seconds"))} on {meta.get("gpu", "?")}.')
+            f'Trained for {fmt_dur(train_s or None)} on {m.get("train_gpu") or "?"}.')
+
+
+_DEMO = []
 
 
 def launch_demo(name=None, share=None):
@@ -2205,10 +2376,12 @@ def launch_demo(name=None, share=None):
                 'Counts are per frame, the same object in two frames is counted twice.')
         return str(out_path), table, df[df['class'].isin(agg.index)], info
 
-    img_examples = []
-    with contextlib.suppress(Exception):
-        files = {im['id']: im['file_name'] for im in load_coco(split)['images']}
-        img_examples = [[str(split_dir(split) / 'images' / files[i])] for i in sample_ids(split)]
+    # test images kept in samples/ (works without the dataset), else picked from the dataset
+    img_examples = [[str(p)] for p in sorted(SAMPLES.glob('*.jpg'))]
+    if not img_examples:
+        with contextlib.suppress(Exception):
+            files = {im['id']: im['file_name'] for im in load_coco(split)['images']}
+            img_examples = [[str(split_dir(split) / 'images' / files[i])] for i in sample_ids(split)]
     videos = sample_videos()
     legend = ' '.join(f'<span style="color:{BOX_COLORS[k]}">&#9632;</span> {n}&nbsp;' for k, n in enumerate(NAMES))
 
@@ -2248,15 +2421,20 @@ def launch_demo(name=None, share=None):
         img_btn.click(on_image, [img_in, model, conf, tiles], [img_out, img_table, img_info])
         vid_btn.click(on_video, [vid_in, model, conf, tiles], [vid_out, vid_table, vid_plot, vid_info])
     share = (PROFILE == 'colab') if share is None else share
+    # running the cell again in a notebook: close the old app so the port is free
+    if _DEMO:
+        with contextlib.suppress(Exception):
+            _DEMO.pop().close()
+    _DEMO.append(app)
     # Recommended: on the server keep the default address and open it through an SSH tunnel
     return app.launch(share=share, server_port=dc['server_port'],
-                      allowed_paths=[str(data_dir()), str(DOWNLOADS / 'samples'), str(RESULTS)])
+                      allowed_paths=[str(data_dir()), str(DOWNLOADS / 'samples'), str(SAMPLES), str(RESULTS)])
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='SkyScout pipeline (settings in config.yaml)')
     p.add_argument('command', choices=['status', 'prepare', 'summary', 'time', 'train', 'eval', 'run', 'sahi',
-                                        'latency', 'all', 'report', 'demo'])
+                                        'latency', 'all', 'report', 'compare', 'samples', 'pack', 'fetch', 'demo'])
     p.add_argument('names', nargs='*', help='experiment names from config.yaml')
     p.add_argument('--split', help='val or test (default from config)')
     p.add_argument('--sahi', action='store_true', help='evaluate with tiled inference')
@@ -2278,6 +2456,14 @@ def main(argv=None):
         benchmark_latency(a.redo)
     elif a.command == 'report':
         make_report()
+    elif a.command == 'compare':
+        make_comparisons(a.split)
+    elif a.command == 'samples':
+        export_samples(a.split)
+    elif a.command == 'pack':
+        pack_models()
+    elif a.command == 'fetch':
+        fetch_models(a.names[0] if a.names else None)
     elif a.command == 'demo':
         launch_demo(a.names[0] if a.names else None)
     else:

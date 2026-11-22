@@ -29,12 +29,13 @@ profiles:
     workers: 8
   local:
     yolo_batch: {640: 8, 1024: 2}
-    dfine_batch: {640: 4, 1024: 1}   # 6 does not fit in 6 GB at 640
+    dfine_batch: {640: 4, 1024: 1}   # Recommended: lower it if training runs out of GPU memory
     workers: 4
-    # Recommended: shorter schedules so every run fits on one laptop GPU in about a day
+    # Recommended: shorter schedules so every run fits on one consumer GPU in about a day
     epochs: {yolo: 50, dfine: 6, dfine_best_long_640: 10}
-    # Breaks at epoch ends so a laptop can cool down: every N minutes of training, or early when the GPU is too hot
+    # Breaks at epoch ends so the machine can cool down: every N minutes of training, or early when the GPU is too hot
     cooldown: {every_minutes: 60, pause_minutes: 10, max_gpu_temp: 85, resume_gpu_temp: 60}
+    device_label: local GPU   # saved instead of the exact GPU model, so public results do not name the machine
 
 # Ultralytics training arguments (passed straight to model.train)
 yolo:
@@ -118,6 +119,8 @@ sahi:
 report:
   main_models: {yolo11s_640: YOLO11s (baseline), yolo26s_640: YOLO26s (newest YOLO), dfine_best_long_640: D-FINE (fine-tuned)}
   data_efficiency: {25: dfine_best_25, 50: dfine_best_50, 100: best}
+  compare_images: 6           # python skyscout.py compare: busy test images, one per scene
+  compare_min_objects: 40
   input_size_pairs:
     - [yolo11s_640, yolo11s_1024]
     - [yolo26s_640, yolo26s_1024]
@@ -131,4 +134,7 @@ demo:
   video_max_width: 1280   # output video width, detection still runs on the full frame
   clip_frames: 60         # sample clip made from one VisDrone test-dev sequence
   clip_fps: 2
+  samples_clip_width: 960   # smaller copy of the clip saved in samples/ (kept in git)
+  pack_models: [yolo11s_640, yolo26s_640, dfine_best_long_640]   # python skyscout.py pack
+  models_url: ''            # link to skyscout_models.zip, used by fetch_models() when models/ is empty
   sample_video_urls: []   # optional extra .mp4 links, saved to downloads/samples

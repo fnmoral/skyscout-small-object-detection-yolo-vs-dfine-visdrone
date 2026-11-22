@@ -14,7 +14,7 @@ Evaluated on the VisDrone-DET **test** split (1610 images) with the shared SkySc
 | FLOPs | 27.1B (at 640 px) |
 | Latency | 339.8 ms/img (inference 308.4, post-process 12.2) |
 
-Training took 4.4 h on NVIDIA GeForce RTX 3060 Laptop GPU (10 epochs). Evaluation took 9.6 min on NVIDIA GeForce RTX 3060 Laptop GPU.
+Training took 4.4 h on local GPU (10 epochs). Evaluation took 9.6 min on local GPU.
 
 #### Per-class performance
 
