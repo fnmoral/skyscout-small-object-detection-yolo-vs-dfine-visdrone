@@ -2331,8 +2331,9 @@ def even_resize(img, max_w):
 def video_writer(path, fps):
     import imageio.v2 as iio
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    return iio.get_writer(str(path), fps=max(fps, 1), codec='libx264', macro_block_size=1, quality=7,
-                          ffmpeg_log_level='error')
+    # yuv420p plays in every browser, faststart puts the index first so playback starts before the whole file arrives
+    return iio.get_writer(str(path), fps=max(fps, 1), codec='libx264', macro_block_size=1, quality=6,
+                          pixelformat='yuv420p', output_params=['-movflags', '+faststart'], ffmpeg_log_level='error')
 
 
 def sample_clip():
@@ -2380,6 +2381,10 @@ def demo_label(name):
     return CFG['report']['main_models'].get(name) or name
 
 
+def short_label(name, sahi=False):
+    return demo_label(name).split(' (')[0] + (' + SAHI' if sahi else '')
+
+
 def model_facts(name):
     '''Saved test-set scores, one-GPU latency and train time of a model (read from results/, works without the dataset).'''
     split = CFG['evaluation']['report_split']
@@ -2397,26 +2402,8 @@ def model_facts(name):
             'family': m['family'], 'setup': m['setup'], 'imgsz': m['imgsz'], 'conf': best_conf(name, split), 'split': split}
 
 
-def model_card_html(name):
-    '''Stats of the selected model as a two-column table.'''
-    f = model_facts(name)
-    if not f:
-        return f'<div class="sk-card">No saved evaluation for <b>{name}</b> yet.</div>'
-    kind = 'CNN, one-stage (YOLO)' if f['family'] == 'yolo' else 'Transformer, end-to-end (D-FINE)'
-    rows = [('Type', kind), ('Setup', f"{f['setup']}, {f['imgsz']} px"),
-            ('mAP@50-95', f"{f['mAP@50-95']:.1f}%"), ('mAP@50', f"{f['mAP@50']:.1f}%"),
-            ('AP small', f"{f['AP small']:.1f}%"), ('Precision', f"{f['Precision']:.1f}%"),
-            ('Recall', f"{f['Recall']:.1f}%"), ('F1', f"{f['F1']:.1f}%"), ('Parameters', f"{f['params']:.1f} M"),
-            ('GFLOPs', f"{f['gflops']:.1f}" if f['gflops'] else 'n/a'), ('Latency', f"{f['ms']:.0f} ms / image"),
-            ('Train time', f"{f['train_h']:.1f} h"), ('Best-F1 confidence', f"{f['conf']:.2f}")]
-    body = ''.join(f'<tr><td>{k}</td><td>{v}</td></tr>' for k, v in rows)
-    return (f'<div class="sk-card"><div class="sk-card-title">{demo_label(name)}</div>'
-            f'<table class="sk-kv">{body}</table>'
-            f'<div class="sk-note">Measured on the VisDrone {f["split"]} split, latency at batch 1.</div></div>')
-
-
 def models_table_html(names, selected):
-    '''All models side by side so the differences help pick one (best value per column in green).'''
+    '''All models side by side so the differences help pick (best value per column in green, selected rows highlighted).'''
     facts = {n: model_facts(n) for n in names}
     facts = {n: f for n, f in facts.items() if f}
     if not facts:
@@ -2428,10 +2415,35 @@ def models_table_html(names, selected):
     rows = ''
     for n, f in facts.items():
         cells = ''.join(f'<td class="{"best" if f[c] == best[c] else ""}">{fmt.format(f[c])}</td>' for c, _, _, fmt in cols)
-        rows += f'<tr class="{"sel" if n == selected else ""}"><td>{demo_label(n)}</td>{cells}</tr>'
-    return (f'<div class="sk-card"><div class="sk-card-title">Compare models</div><table class="sk-cmp">{head}{rows}</table>'
+        rows += f'<tr class="{"sel" if n in (selected or []) else ""}"><td>{demo_label(n)}</td>{cells}</tr>'
+    return (f'<div class="sk-card"><div class="sk-card-title">All models</div><table class="sk-cmp">{head}{rows}</table>'
             '<div class="sk-note">mAP = mAP@50-95, AP small = objects under 32 x 32 px, ms = latency per image. '
-            'Green = best in the column.</div></div>')
+            'Green = best in the column, highlighted = selected.</div></div>')
+
+
+def selected_table_html(names):
+    '''Every saved score of the selected models, one column per model (best per row in green).'''
+    facts = {n: model_facts(n) for n in names or []}
+    facts = {n: f for n, f in facts.items() if f}
+    if not facts:
+        return '<div class="sk-card">Select at least one model.</div>'
+    rows = [('mAP@50-95', '{:.1f}%', True), ('mAP@50', '{:.1f}%', True), ('AP small', '{:.1f}%', True),
+            ('Precision', '{:.1f}%', True), ('Recall', '{:.1f}%', True), ('F1', '{:.1f}%', True),
+            ('params', '{:.1f} M', False), ('gflops', '{:.1f}', False), ('ms', '{:.0f} ms', False),
+            ('train_h', '{:.1f} h', False), ('conf', '{:.2f}', None)]
+    names_ = {'params': 'Parameters', 'gflops': 'GFLOPs', 'ms': 'Latency', 'train_h': 'Train time', 'conf': 'Best-F1 conf'}
+    head = '<tr><th></th>' + ''.join(f'<th>{short_label(n)}</th>' for n in facts) + '</tr>'
+    kind = '<tr><td>Type</td>' + ''.join(f'<td>{"CNN" if f["family"] == "yolo" else "Transformer"}</td>' for f in facts.values()) + '</tr>'
+    body = kind
+    for key, fmt, hi in rows:
+        vals = [f[key] for f in facts.values()]
+        ok = [v for v in vals if v is not None]
+        best = (max(ok) if hi else min(ok)) if ok and hi is not None and len(facts) > 1 else None
+        cells = ''.join(f'<td class="{"best" if v is not None and v == best else ""}">{fmt.format(v) if v is not None else "n/a"}</td>' for v in vals)
+        body += f'<tr><td>{names_.get(key, key)}</td>{cells}</tr>'
+    split = next(iter(facts.values()))['split']
+    return (f'<div class="sk-card"><div class="sk-card-title">Selected models</div><table class="sk-cmp sk-sel">{head}{body}</table>'
+            f'<div class="sk-note">Saved scores on the VisDrone {split} split, latency at batch 1.</div></div>')
 
 
 def unique_boxes(runs, iou=0.5):
@@ -2446,26 +2458,118 @@ def unique_boxes(runs, iou=0.5):
     return out
 
 
-def render_run(img, run, unique=None, max_w=1400):
-    '''Drawn detections of one run, shrunk for the gallery. With unique: shared boxes grey, boxes only this run found in magenta.'''
+def run_variants(mode):
+    '''SAHI setting -> list of variants per model (False = full image, True = SAHI tiles).'''
+    return {'On': [True], 'Compare': [False, True]}.get(mode, [False])
+
+
+def keep_classes(d, classes):
+    b, s, c = d
+    m = np.isin(c, [NAMES.index(x) for x in classes or []])
+    return b[m], s[m], c[m]
+
+
+def run_marks(runs, highlight):
+    '''Boxes only one model found among runs with the same SAHI setting (when highlight is on),
+    and boxes SAHI adds over the same model on the full image.'''
+    uniq = {}
+    if highlight:
+        for v in {k[1] for k in runs}:
+            group = {k: {'b': d[0]} for k, d in runs.items() if k[1] == v}
+            if len(group) > 1:
+                uniq.update(unique_boxes(group))
+    added = {}
+    for (m, sahi), (b, _, _) in runs.items():
+        if sahi and (m, False) in runs:
+            fb = runs[(m, False)][0]
+            added[(m, sahi)] = box_iou(b, fb).max(1) < 0.5 if len(b) and len(fb) else np.ones(len(b), bool)
+    return uniq, added
+
+
+def draw_tile(img, d, unique=None, added=None, show_sahi=False, width=640):
+    '''One model's detections, resized to width. unique = magenta (only this run), added = lime (SAHI found it, full image did not).'''
     import cv2
-    s = min(1.0, max_w / img.shape[1])
-    small = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1 else img.copy()
-    b = run['b'] * s
-    if unique is None:
-        return draw_dets(small, b, run['s'], run['c'])
-    t = max(1, round(max(small.shape[:2]) / 900))
-    fill = small.copy()
-    for (x1, y1, x2, y2), u in zip(b.astype(int), unique):
-        if u:
-            cv2.rectangle(fill, (x1, y1), (x2, y2), (255, 0, 255), -1)
-        else:
-            cv2.rectangle(small, (x1, y1), (x2, y2), (190, 190, 190), 1)
-    out = cv2.addWeighted(fill, 0.35, small, 0.65, 0)
-    for (x1, y1, x2, y2), u in zip(b.astype(int), unique):
-        if u:
-            cv2.rectangle(out, (x1, y1), (x2, y2), (255, 0, 255), t + 1)
-    return out
+    s = width / img.shape[1]
+    tile = cv2.resize(img, (width, max(1, int(round(img.shape[0] * s)))), interpolation=cv2.INTER_AREA)
+    b, _, c = d
+    boxes = (b * s).astype(int)
+    t = max(1, round(width / 700))
+    u = unique if unique is not None else np.zeros(len(b), bool)
+    a = added if (show_sahi and added is not None) else np.zeros(len(b), bool)
+    fill = tile.copy()
+    for (x1, y1, x2, y2), k, ui, ai in zip(boxes, c, u, a):
+        if ui or ai:
+            cv2.rectangle(fill, (x1, y1), (x2, y2), (255, 0, 255) if ui else (0, 255, 120), -1)
+        # with highlights on, shared boxes go grey so the highlighted ones stand out
+        dim = (unique is not None or a.any()) and not (ui or ai)
+        col = (170, 170, 170) if dim else tuple(int(BOX_COLORS[k][j:j + 2], 16) for j in (1, 3, 5))
+        cv2.rectangle(tile, (x1, y1), (x2, y2), col, 1 if dim else t)
+    if u.any() or a.any():
+        tile = cv2.addWeighted(fill, 0.3, tile, 0.7, 0)
+        for (x1, y1, x2, y2), ui, ai in zip(boxes, u, a):
+            if ui or ai:
+                cv2.rectangle(tile, (x1, y1), (x2, y2), (255, 0, 255) if ui else (0, 255, 120), t + 1)
+    return tile
+
+
+def caption_bar(width, title, line):
+    '''Dark label strip above a tile: model name and its numbers.'''
+    import cv2
+    # big enough to read when the whole grid is shrunk to fit the page
+    f = max(0.6, width / 850)
+    h = int(48 * f / 0.5)
+    bar = np.full((h, width, 3), (30, 41, 59), np.uint8)
+    th = max(2, round(f * 2))
+    cv2.putText(bar, title, (int(12 * f), int(h * 0.44)), cv2.FONT_HERSHEY_SIMPLEX, f * 1.1, (255, 255, 255), th, cv2.LINE_AA)
+    cv2.putText(bar, line, (int(12 * f), int(h * 0.84)), cv2.FONT_HERSHEY_SIMPLEX, f * 0.9, (203, 213, 225), max(1, th - 1), cv2.LINE_AA)
+    return bar
+
+
+def tile_line(d, u=None, a=None):
+    return f'{len(d[0])} objects' + (f'  |  {int(u.sum())} only here' if u is not None else '') + \
+        (f'  |  SAHI adds {int(a.sum())}' if a is not None else '')
+
+
+def compose_grid(img, runs_f, models, variants, highlight, show_sahi, width):
+    '''Side-by-side picture: one column per model, one row per SAHI variant, a label strip above each tile.'''
+    uniq, added = run_marks(runs_f, highlight)
+    gap, bg = 8, (15, 23, 42)
+    rows = []
+    for v in variants:
+        tiles = []
+        for m in models:
+            k = (m, v)
+            d, u, a = runs_f[k], uniq.get(k), added.get(k)
+            t = draw_tile(img, d, u, a, show_sahi, width)
+            tiles.append(np.vstack([caption_bar(t.shape[1], short_label(m, v), tile_line(d, u, a)), t]))
+        sep = np.full((tiles[0].shape[0], gap, 3), bg, np.uint8)
+        rows.append(np.hstack([x for t in tiles for x in (t, sep)][:-1]))
+    sep = np.full((gap, rows[0].shape[1], 3), bg, np.uint8)
+    return np.vstack([x for r in rows for x in (r, sep)][:-1]), uniq, added
+
+
+def stats_markdown(cols, rows):
+    '''Transposed table: one column per run (same order as the tiles), one row per measure.'''
+    head = '| | ' + ' | '.join(cols) + ' |\n|---|' + '---|' * len(cols) + '\n'
+    return head + ''.join(f'| **{name}** | ' + ' | '.join(vals) + ' |\n' for name, vals in rows)
+
+
+def iter_frames(video, stride, limit):
+    '''(frame index, RGB frame) of a video, every stride-th frame, at most limit frames.'''
+    import cv2
+    cap = cv2.VideoCapture(video)
+    idx, done = 0, 0
+    try:
+        while done < limit:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if idx % stride == 0:
+                yield idx, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                done += 1
+            idx += 1
+    finally:
+        cap.release()
 
 
 DEMO_CSS = '''
@@ -2476,44 +2580,72 @@ DEMO_CSS = '''
 .sk-chips {margin-top: 10px}
 .sk-chips span {display: inline-block; padding: 3px 11px; margin: 0 6px 6px 0; border-radius: 999px;
                 background: rgba(255,255,255,.16); font-size: .78rem; color: #fff}
-.sk-panel {border: 1px solid var(--border-color-primary); border-radius: 18px; padding: 6px 10px;
-           background: var(--background-fill-secondary)}
+.sk-panel {border: 1px solid var(--border-color-primary); border-radius: 18px; padding: 10px 12px !important;
+           background: var(--background-fill-secondary); gap: 10px !important}
+.sk-step {display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: .92rem; margin: 6px 2px -2px}
+.sk-step b {display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%;
+            background: var(--color-accent); color: #fff; font-size: .75rem}
+.sk-box {border: 1px solid var(--border-color-primary) !important; border-radius: 14px !important;
+         background: var(--block-background-fill) !important; padding: 8px 10px !important}
 .sk-card {border: 1px solid var(--border-color-primary); border-radius: 14px; padding: 12px 14px;
           background: var(--block-background-fill)}
-.sk-card-title {font-weight: 650; font-size: 1rem; margin-bottom: 8px}
-table.sk-kv, table.sk-cmp {width: 100%; border-collapse: collapse; font-size: .86rem; margin: 0}
-table.sk-kv td {padding: 5px 4px; border: 0; border-bottom: 1px solid var(--border-color-primary)}
-table.sk-kv tr:last-child td {border-bottom: 0}
-table.sk-kv td:first-child {color: var(--body-text-color-subdued)}
-table.sk-kv td:last-child {text-align: right; font-weight: 550; font-variant-numeric: tabular-nums}
+.sk-card-title {font-weight: 650; font-size: .95rem; margin-bottom: 8px}
+table.sk-cmp {width: 100%; border-collapse: collapse; font-size: .84rem; margin: 0}
 table.sk-cmp th {padding: 4px; border: 0; text-align: right; font-weight: 600; font-size: .74rem;
                  color: var(--body-text-color-subdued); background: none}
-table.sk-cmp td {padding: 6px 4px; border: 0; border-top: 1px solid var(--border-color-primary); text-align: right;
+table.sk-cmp td {padding: 5px 4px; border: 0; border-top: 1px solid var(--border-color-primary); text-align: right;
                  font-variant-numeric: tabular-nums}
 table.sk-cmp th:first-child, table.sk-cmp td:first-child {text-align: left}
+table.sk-sel td:first-child {color: var(--body-text-color-subdued)}
 table.sk-cmp tr.sel td {background: var(--color-accent-soft); font-weight: 650}
 table.sk-cmp td.best {color: #16a34a; font-weight: 700}
 .sk-note {font-size: .74rem; color: var(--body-text-color-subdued); margin-top: 8px}
-.sk-legend span {display: inline-block; margin: 0 10px 4px 0; font-size: .8rem; white-space: nowrap}
-.sk-legend i {display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px}
-.sk-section {font-weight: 650; font-size: .95rem; margin: 4px 0 -4px}
-/* Gradio prose styles put borders on every table, the cards use row lines only */
+.sk-scale {display: flex; justify-content: space-between; gap: 10px; font-size: .74rem; line-height: 1.25;
+           color: var(--body-text-color-subdued); margin: 2px 2px -6px}
+.sk-scale span:last-child {text-align: right}
+.sk-scale b {color: var(--body-text-color); font-weight: 600}
+.sk-hint {font-weight: 400; font-size: .76rem; color: var(--body-text-color-subdued); margin-left: 6px}
+.sk-legend-note {font-size: .74rem; color: var(--body-text-color-subdued); margin-top: 4px}
 .sk-card tr {border: 0 !important}
 .sk-card table, .sk-card th, .sk-card td {border-left: 0 !important; border-right: 0 !important}
 .sk-card table {border-top: 0 !important; border-bottom: 0 !important}
 .sk-card tr:first-child th {border-top: 0 !important}
-/* model picker as a vertical list */
-.sk-models .wrap {display: flex !important; flex-direction: column; gap: 6px}
-.sk-models label {width: 100%; margin: 0 !important}
+#sk-models .wrap, #sk-sahi .wrap {display: flex !important; flex-direction: column; gap: 6px}
+#sk-models label, #sk-sahi label {width: 100%; margin: 0 !important}
+#sk-classes .wrap {gap: 6px}
+#sk-classes label {padding: 4px 9px !important}
+#sk-stats table {font-size: .9rem}
 '''
+# one colored square per class in the class filter, same colors as the boxes
+DEMO_CSS += ''.join(f'#sk-classes label:nth-child({k + 1}) span::before {{content: ""; display: inline-block; width: 10px; '
+                    f'height: 10px; border-radius: 3px; margin-right: 6px; background: {c}}}\n' for k, c in enumerate(BOX_COLORS))
 
+# plays, pauses and seeks every video marked sk-sync together (original and side-by-side result)
+SYNC_JS = '''<script>
+(() => {
+  let busy = false;
+  const peers = v => v.closest('.sk-sync') ? [...document.querySelectorAll('.sk-sync video')].filter(x => x !== v) : [];
+  const mirror = fn => e => {
+    const v = e.target;
+    if (busy || !(v instanceof HTMLVideoElement)) return;
+    const others = peers(v);
+    if (!others.length) return;
+    busy = true;
+    others.forEach(o => { try { fn(v, o); } catch (err) {} });
+    setTimeout(() => { busy = false; }, 80);
+  };
+  document.addEventListener('play', mirror((v, o) => { o.currentTime = v.currentTime; o.play().catch(() => {}); }), true);
+  document.addEventListener('pause', mirror((v, o) => o.pause()), true);
+  document.addEventListener('seeked', mirror((v, o) => { if (Math.abs(o.currentTime - v.currentTime) > 0.15) o.currentTime = v.currentTime; }), true);
+  document.addEventListener('ratechange', mirror((v, o) => { o.playbackRate = v.playbackRate; }), true);
+})();
+</script>'''
 
 _DEMO = []
 
 
 def launch_demo(name=None, share=None):
-    '''Gradio app: pick a model, run it on a drone photo or video, get boxes and counts per class, compare runs side by side.'''
-    import cv2
+    '''Gradio app: run one or more models on a drone photo or video and compare them side by side.'''
     import hashlib
     import gradio as gr
     import pandas as pd
@@ -2522,93 +2654,154 @@ def launch_demo(name=None, share=None):
     if not choices:
         raise FileNotFoundError('No fine-tuned models yet. Recommended: train at least one experiment first')
     split = CFG['evaluation']['report_split']
-    scored = {n: (metrics_for(n, split) or {}).get('map50_95', -1) for n in choices}
-    default = name or max(scored, key=scored.get)
-    colors = {n: BOX_COLORS[k] for k, n in enumerate(NAMES)}
-    hint = 'Run one or more models on the same photo, they show up here side by side.'
+    mains = [n for n in CFG['report']['main_models'] if n in choices]
+    default = [name] if name else (mains or choices[:1])
+    stride, limit = max(1, dc['video_stride']), dc['video_max_frames']
+    sahi_modes = [('Off: full image only', 'Off'), ('On: tiles only', 'On'), ('Compare: with and without tiles', 'Compare')]
 
-    def image_key(image):
-        return hashlib.md5(np.ascontiguousarray(image[::7, ::7]).tobytes()).hexdigest()
+    def conf_of(m, use_best, conf):
+        return best_conf(m) if use_best else conf
 
-    def gallery(image, state, highlight):
+    def class_rows(cols, per_run, kind):
+        rows = []
+        for k, n in enumerate(NAMES):
+            vals = [per_run[c][k] for c in cols]
+            if any(vals):
+                rows.append([n] + [round(v, 1) if kind == 'avg' else int(v) for v in vals])
+        return pd.DataFrame(rows, columns=['Class'] + cols)
+
+    # Photo
+
+    def photo_view(image, state, models, mode, classes, highlight, show_sahi):
+        variants = run_variants(mode)
+        keys = [(m, v) for v in variants for m in models or []]
         runs = (state or {}).get('runs', {})
-        if image is None or not runs:
-            return [], hint
-        uniq = unique_boxes(runs) if highlight and len(runs) > 1 else {}
-        items, lines = [], ['| Run | Objects | Only this run | Time |', '|---|---|---|---|']
-        for k, r in runs.items():
-            u = uniq.get(k)
-            # short caption so it fits under a thumbnail, the table below has the full names
-            cap = f'{k.split(" (")[0]}{" + SAHI" if k.endswith("SAHI") else ""}: {len(r["b"])} objects' + (f' · {int(u.sum())} only here' if u is not None else '')
-            items.append((render_run(image, r, u), cap))
-            lines.append(f'| {k} | {len(r["b"])} | {int(u.sum()) if u is not None else "-"} | {r["ms"]:.0f} ms |')
+        if image is None or not keys:
+            return None, '', None, 'Pick a photo and at least one model, then click **Detect objects**.'
+        if any(k not in runs for k in keys):
+            return None, '', None, 'Settings changed: click **Detect objects** to run the selected models.'
+        runs_f = {k: keep_classes(runs[k]['d'], classes) for k in keys}
+        width = {1: 1400, 2: 1000, 3: 820}.get(len(models), 640)
+        grid, uniq, added = compose_grid(image, runs_f, models, variants, highlight, show_sahi, width)
+        cols = [short_label(*k) for k in keys]
+        rows = [('Objects', [str(len(runs_f[k][0])) for k in keys])]
         if uniq:
-            note = 'Magenta = found by this run only (no box of another run overlaps it by 50% or more). Grey = also found by another run.'
-        elif len(runs) > 1:
-            note = 'Turn on "Highlight differences" to see the boxes that only one model found.'
-        else:
-            note = 'Run another model (or the same one with SAHI) on this photo to compare.'
-        return items, '\n'.join(lines) + '\n\n' + note + ' The first run of a model also includes loading it.'
+            rows.append(('Only this run', [str(int(uniq[k].sum())) for k in keys]))
+        if added:
+            rows.append(('SAHI adds', [f'+{int(added[k].sum())}' if k in added else '-' for k in keys]))
+        rows += [('Confidence', [f'{runs[k]["conf"]:.2f}' for k in keys]), ('Time', [f'{runs[k]["ms"]:.0f} ms' for k in keys])]
+        per_run = {short_label(*k): np.bincount(runs_f[k][2], minlength=NC) for k in keys}
+        info = []
+        for m in models:
+            if (m, True) in added:
+                info.append(f'**{short_label(m)}**: {len(runs_f[(m, False)][0])} objects on the full image, '
+                            f'{len(runs_f[(m, True)][0])} with SAHI, of which **{int(added[(m, True)].sum())} new**.')
+        if uniq:
+            info.append('Magenta = found by that model only, compared with the other models in the same row '
+                        '(no box of theirs overlaps it by 50% or more).')
+        if added and show_sahi:
+            info.append('Lime = found with SAHI tiles but not on the full image.')
+        info.append('Times include loading a model the first time it is used.')
+        return grid, stats_markdown(cols, rows), class_rows(cols, per_run, 'count'), ' '.join(info)
 
-    def on_image(image, model_name, conf, tiles, state, highlight):
-        if image is None:
-            return None, None, 'Upload or pick a drone photo first.', state, [], hint
-        runner = load_runner(model_name)
-        t0 = time.perf_counter()
-        (b, s, c), _ = detect(runner, image, conf, tiles)
-        ms = (time.perf_counter() - t0) * 1e3
-        # runs are kept per photo, a different photo starts a new comparison
-        key = image_key(image)
+    def on_photo(image, models, use_best, conf, mode, classes, highlight, show_sahi, state, progress=gr.Progress()):
+        if image is None or not models:
+            return (state,) + photo_view(image, state, models, mode, classes, highlight, show_sahi)
+        key = hashlib.md5(np.ascontiguousarray(image[::7, ::7]).tobytes()).hexdigest()
         if not state or state.get('key') != key:
             state = {'key': key, 'runs': {}}
-        state['runs'][demo_label(model_name) + (' + SAHI' if tiles else '')] = {'b': b, 's': s, 'c': c, 'ms': ms}
-        rows = [{'Class': NAMES[k], 'Count': int((c == k).sum()), 'Avg confidence': round(float(s[c == k].mean()), 2)}
-                for k in range(NC) if (c == k).any()]
-        table = pd.DataFrame(sorted(rows, key=lambda r: -r['Count']), columns=['Class', 'Count', 'Avg confidence'])
-        info = (f'**{len(c)} objects** in {len(rows)} classes, found by `{model_name}` in {ms:.0f} ms '
-                f'({"SAHI tiles" if tiles else "full image"}, confidence >= {conf:.2f}).')
-        return (draw_dets(image, b, s, c), table, info, state) + gallery(image, state, highlight)
+        keys = [(m, v) for v in run_variants(mode) for m in models]
+        for i, (m, v) in enumerate(keys):
+            c = conf_of(m, use_best, conf)
+            old = state['runs'].get((m, v))
+            if old and old['conf'] == c:
+                continue
+            progress((i, len(keys)), desc=f'Running {short_label(m, v)}')
+            t0 = time.perf_counter()
+            d, _ = detect(load_runner(m), image, c, v)
+            state['runs'][(m, v)] = {'d': d, 'conf': c, 'ms': (time.perf_counter() - t0) * 1e3}
+        return (state,) + photo_view(image, state, models, mode, classes, highlight, show_sahi)
 
-    def on_video(video, model_name, conf, tiles, progress=gr.Progress()):
-        if not video:
-            return None, None, None, 'Upload or pick a video first.'
-        runner = load_runner(model_name)
-        cap = cv2.VideoCapture(video)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        stride, limit = max(1, dc['video_stride']), dc['video_max_frames']
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        n_out = min(math.ceil(total / stride), limit) if total else limit
-        out_path = RESULTS / 'demo' / f'{Path(video).stem}_{model_name}{"_sahi" if tiles else ""}.mp4'
-        rows, ms, idx, done = [], [], 0, 0
-        with video_writer(out_path, fps / stride) as w:
-            while done < limit:
-                ok, frame = cap.read()
-                if not ok:
+    # Video
+
+    def video_view(video, vstate, models, mode, classes, highlight, show_sahi, progress=gr.Progress()):
+        variants = run_variants(mode)
+        keys = [(m, v) for v in variants for m in models or []]
+        runs = (vstate or {}).get('runs', {})
+        if not video or not keys:
+            return None, '', None, None, 'Pick a video and at least one model, then click **Detect objects in video**.'
+        if any(k not in runs for k in keys):
+            return None, '', None, None, 'Settings changed: click **Detect objects in video** to run the selected models.'
+        width = {1: 960, 2: 800, 3: 640}.get(len(models), 480)
+        fps = vstate['fps']
+        cols = [short_label(*k) for k in keys]
+        n = min(len(runs[k]['dets']) for k in keys)
+        counts = {c: [] for c in cols}
+        only = {c: [] for c in cols}
+        adds = {c: [] for c in cols}
+        per_class = {c: np.zeros(NC) for c in cols}
+        plot = []
+        out_dir = RESULTS / 'demo'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # a new file name each time so the browser does not show a cached older video
+        out_path = out_dir / f'{Path(video).stem}_compare_{int(time.time() * 1000)}.mp4'
+        with video_writer(out_path, fps) as w:
+            for i, (idx, rgb) in enumerate(iter_frames(video, stride, limit)):
+                if i >= n:
                     break
-                if idx % stride == 0:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    t0 = time.perf_counter()
-                    (b, s, c), _ = detect(runner, rgb, conf, tiles)
-                    ms.append((time.perf_counter() - t0) * 1e3)
-                    counts = np.bincount(c, minlength=NC)
-                    rows += [{'time_s': round(idx / fps, 2), 'class': NAMES[k], 'count': int(counts[k])} for k in range(NC)]
-                    w.append_data(even_resize(draw_dets(rgb, b, s, c), dc['video_max_width']))
-                    done += 1
-                    progress((done, n_out), desc='Detecting frames')
-                idx += 1
-        cap.release()
-        if not done:
-            return None, None, None, 'Could not read any frames from this video.'
-        df = pd.DataFrame(rows)
-        agg = df.groupby('class')['count'].agg(['mean', 'max'])
-        agg = agg[agg['max'] > 0].sort_values('mean', ascending=False)
-        table = pd.DataFrame({'Class': agg.index, 'Avg per frame': agg['mean'].round(1).values, 'Max in one frame': agg['max'].values})
-        per_frame = df.groupby('time_s')['count'].sum()
-        info = (f'Processed **{done} frames** with `{model_name}` ({"SAHI tiles" if tiles else "full image"}, '
-                f'confidence >= {conf:.2f}): {np.mean(ms):.0f} ms per frame ({1000 / np.mean(ms):.1f} FPS). '
-                f'Objects per frame: {per_frame.mean():.0f} on average, {per_frame.max()} at most. '
-                'Counts are per frame, the same object in two frames is counted twice.')
-        return str(out_path), table, df[df['class'].isin(agg.index)], info
+                runs_f = {k: keep_classes(runs[k]['dets'][i], classes) for k in keys}
+                grid, uniq, added = compose_grid(rgb, runs_f, models, variants, highlight, show_sahi, width)
+                w.append_data(even_resize(grid, 1920))
+                for k, c in zip(keys, cols):
+                    counts[c].append(len(runs_f[k][0]))
+                    per_class[c] += np.bincount(runs_f[k][2], minlength=NC)
+                    if k in uniq:
+                        only[c].append(int(uniq[k].sum()))
+                    if k in added:
+                        adds[c].append(int(added[k].sum()))
+                    plot.append({'time_s': round(idx / (fps * stride), 2), 'run': c, 'count': len(runs_f[k][0])})
+                progress((i + 1, n), desc='Drawing the side-by-side video')
+        # keep only the newest few videos
+        for old in sorted(out_dir.glob('*_compare_*.mp4'))[:-6]:
+            with contextlib.suppress(OSError):
+                old.unlink()
+        ms = {c: np.mean(runs[k]['ms']) for k, c in zip(keys, cols)}
+        rows = [('Avg objects per frame', [f'{np.mean(counts[c]):.1f}' for c in cols]),
+                ('Max in one frame', [str(max(counts[c])) for c in cols])]
+        if any(only.values()):
+            rows.append(('Only this run (avg)', [f'{np.mean(only[c]):.1f}' if only[c] else '-' for c in cols]))
+        if any(adds.values()):
+            rows.append(('SAHI adds (avg)', [f'+{np.mean(adds[c]):.1f}' if adds[c] else '-' for c in cols]))
+        rows += [('Time per frame', [f'{ms[c]:.0f} ms' for c in cols]), ('Speed', [f'{1000 / ms[c]:.1f} FPS' for c in cols])]
+        table = class_rows(cols, {c: per_class[c] / max(n, 1) for c in cols}, 'avg')
+        info = (f'Processed **{n} frames** with {len(keys)} run{"s" if len(keys) > 1 else ""}. Counts are per frame '
+                '(no tracking), so the same object in two frames counts twice. The original and the result play and seek together.')
+        return str(out_path), stats_markdown(cols, rows), table, pd.DataFrame(plot), info
+
+    def on_video(video, models, use_best, conf, mode, classes, highlight, show_sahi, vstate, progress=gr.Progress()):
+        if not video or not models:
+            return (vstate,) + video_view(video, vstate, models, mode, classes, highlight, show_sahi, progress)
+        key = f'{video}:{os.path.getmtime(video)}'
+        if not vstate or vstate.get('key') != key:
+            import cv2
+            cap = cv2.VideoCapture(video)
+            vstate = {'key': key, 'runs': {}, 'fps': (cap.get(cv2.CAP_PROP_FPS) or 25.0) / stride}
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            cap.release()
+            vstate['frames'] = min(math.ceil(total / stride), limit) if total else limit
+        keys = [(m, v) for v in run_variants(mode) for m in models]
+        todo = [(m, v) for m, v in keys if (m, v) not in vstate['runs'] or vstate['runs'][(m, v)]['conf'] != conf_of(m, use_best, conf)]
+        for j, (m, v) in enumerate(todo):
+            runner, c = load_runner(m), conf_of(m, use_best, conf)
+            dets, ms = [], []
+            for i, (_, rgb) in enumerate(iter_frames(video, stride, limit)):
+                t0 = time.perf_counter()
+                dets.append(detect(runner, rgb, c, v)[0])
+                ms.append((time.perf_counter() - t0) * 1e3)
+                progress((i + 1, vstate['frames']), desc=f'{short_label(m, v)} ({j + 1}/{len(todo)}): detecting frames')
+            # the first frame also loads the model, so it is left out of the speed
+            vstate['runs'][(m, v)] = {'dets': dets, 'ms': ms[1:] or ms, 'conf': c}
+        return (vstate,) + video_view(video, vstate, models, mode, classes, highlight, show_sahi, progress)
 
     # test images kept in samples/ (works without the dataset), else picked from the dataset
     img_examples = [[str(p)] for p in sorted(SAMPLES.glob('*.jpg'))]
@@ -2617,61 +2810,100 @@ def launch_demo(name=None, share=None):
             files = {im['id']: im['file_name'] for im in load_coco(split)['images']}
             img_examples = [[str(split_dir(split) / 'images' / files[i])] for i in sample_ids(split)]
     videos = sample_videos()
-    legend = ''.join(f'<span><i style="background:{BOX_COLORS[k]}"></i>{n}</span>' for k, n in enumerate(NAMES))
-    chips = ''.join(f'<span>{lab}</span>' for n, lab in CFG['report']['main_models'].items() if n in choices)
-    chips += f'<span>{len(choices)} models</span><span>VisDrone2019</span>'
+    chips = ''.join(f'<span>{demo_label(n)}</span>' for n in mains) + f'<span>{len(choices)} models</span><span>VisDrone2019</span>'
 
     with gr.Blocks(title='SkyScout') as app:
         gr.HTML(f'<div class="sk-header"><h1>SkyScout</h1><p>Small-object detection in drone images: fine-tuned YOLO (CNN) '
-                f'vs D-FINE (transformer). Pick a model, try a photo or a video, and compare models side by side.</p>'
+                f'vs D-FINE (transformer). Select one or more models, run them on a photo or a video, and compare them side by side.</p>'
                 f'<div class="sk-chips">{chips}</div></div>')
         with gr.Row(equal_height=False):
-            with gr.Column(scale=1, min_width=330, elem_classes='sk-panel'):
-                gr.HTML('<div class="sk-section">Settings</div>')
-                model = gr.Radio([(demo_label(n), n) for n in choices], value=default, label='Model', elem_classes='sk-models')
-                conf = gr.Slider(0.05, 0.95, value=best_conf(default), step=0.01, label='Confidence threshold',
-                                 info='Starts at the best-F1 value of each model')
-                tiles = gr.Checkbox(label='Tiled inference (SAHI)', info='Slower, but finds smaller objects')
+            with gr.Column(scale=1, min_width=340, elem_classes='sk-panel'):
+                gr.HTML('<div class="sk-step"><b>1</b>Models</div>')
+                models = gr.CheckboxGroup([(demo_label(n), n) for n in choices], value=default, show_label=False,
+                                          elem_id='sk-models', elem_classes='sk-box')
+                gr.HTML('<div class="sk-step"><b>2</b>Confidence</div>')
+                with gr.Group(elem_classes='sk-box'):
+                    use_best = gr.Checkbox(value=True, label="Each model's best-F1 confidence",
+                                           info='Recommended: score scales differ between models')
+                    gr.HTML('<div class="sk-scale"><span>&larr; <b>More boxes</b><br>finds more, more false alarms</span>'
+                            '<span><b>Fewer, surer boxes</b> &rarr;<br>more precise, misses more</span></div>')
+                    conf = gr.Slider(0.05, 0.95, value=best_conf(default[0]), step=0.01, show_label=False, interactive=False)
+                gr.HTML('<div class="sk-step"><b>3</b>Tiled inference (SAHI)</div>')
+                sahi_mode = gr.Radio(sahi_modes, value='Off', show_label=False, elem_id='sk-sahi', elem_classes='sk-box')
+                gr.HTML('<div class="sk-step"><b>4</b>Classes</div>')
+                with gr.Group(elem_classes='sk-box'):
+                    classes = gr.CheckboxGroup(NAMES, value=NAMES, show_label=False, elem_id='sk-classes')
+                    with gr.Row():
+                        all_btn = gr.Button('All', size='sm')
+                        none_btn = gr.Button('None', size='sm')
+                    gr.HTML('<div class="sk-legend-note">Box colors. Turn classes off to hide them in the detections, counts and comparisons.</div>')
                 table_html = gr.HTML(models_table_html(choices, default))
-                card = gr.HTML(model_card_html(default))
-                gr.HTML(f'<div class="sk-card"><div class="sk-card-title">Box colors</div><div class="sk-legend">{legend}</div></div>')
+                card = gr.HTML(selected_table_html(default))
             with gr.Column(scale=3):
                 with gr.Tab('Photo'):
-                    state = gr.State({})
-                    with gr.Row():
-                        img_in = gr.Image(type='numpy', label='Drone photo', height=430)
-                        img_out = gr.Image(label='Detections', height=430, interactive=False)
-                    img_btn = gr.Button('Detect objects', variant='primary', size='lg')
-                    img_info = gr.Markdown()
-                    img_table = gr.Dataframe(label='Objects per class', interactive=False)
+                    pstate = gr.State({})
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=3):
+                            img_in = gr.Image(type='numpy', label='Drone photo', height=330)
+                        with gr.Column(scale=2):
+                            img_btn = gr.Button('Detect objects', variant='primary', size='lg')
+                            p_high = gr.Checkbox(label='Highlight differences', info='Magenta = boxes only that model found')
+                            p_sahi = gr.Checkbox(label='Show what SAHI adds', info='Lime = found only with tiles (SAHI mode Compare)')
+                            p_info = gr.Markdown('Pick a photo and at least one model, then click **Detect objects**.')
                     if img_examples:
                         gr.Examples(img_examples, inputs=[img_in], label='Test-set photos (click one)')
-                    with gr.Accordion('Side by side: every model run on this photo', open=True) as acc:
-                        with gr.Row(equal_height=True):
-                            show_btn = gr.Button('Show side by side', size='sm')
-                            highlight = gr.Checkbox(label='Highlight differences', info='Magenta = boxes only this run found')
-                            clear_btn = gr.Button('Clear runs', size='sm')
-                        side = gr.Gallery(columns=3, height=360, object_fit='contain', allow_preview=True, show_label=False)
-                        side_info = gr.Markdown(hint, elem_id='sk-side-info')
+                    gr.HTML('<div class="sk-step">Side by side <span class="sk-hint">fullscreen and download buttons at the top right of the picture</span></div>')
+                    p_grid = gr.Image(show_label=False, interactive=False, buttons=['fullscreen', 'download'])
+                    p_stats = gr.Markdown(elem_id='sk-stats')
+                    p_table = gr.Dataframe(label='Objects per class', interactive=False)
                 with gr.Tab('Video'):
-                    with gr.Row():
-                        vid_in = gr.Video(label='Drone video', height=400)
-                        vid_out = gr.Video(label='Detections', height=400, interactive=False)
-                    vid_btn = gr.Button('Detect objects in video', variant='primary', size='lg')
-                    vid_info = gr.Markdown(f'Recommended: keep clips short, at most {dc["video_max_frames"]} frames are processed.')
-                    with gr.Row():
-                        vid_table = gr.Dataframe(label='Objects per class', interactive=False)
-                        vid_plot = gr.LinePlot(x='time_s', y='count', color='class', color_map=colors, label='Objects per frame',
-                                               x_title='Time (s)', y_title='Count')
+                    vstate = gr.State({})
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=3):
+                            vid_in = gr.Video(label='Drone video', height=330, elem_classes='sk-sync')
+                        with gr.Column(scale=2):
+                            vid_btn = gr.Button('Detect objects in video', variant='primary', size='lg')
+                            v_high = gr.Checkbox(label='Highlight differences', info='Magenta = boxes only that model found')
+                            v_sahi = gr.Checkbox(label='Show what SAHI adds', info='Lime = found only with tiles (SAHI mode Compare)')
+                            v_info = gr.Markdown(f'Recommended: keep clips short, at most {limit} frames are processed.')
                     if videos:
                         gr.Examples([[str(v)] for v in videos], inputs=[vid_in], label='Sample videos (click one)')
-        model.change(lambda n: (models_table_html(choices, n), model_card_html(n), best_conf(n)), model, [table_html, card, conf])
-        img_btn.click(on_image, [img_in, model, conf, tiles, state, highlight], [img_out, img_table, img_info, state, side, side_info])
-        show_btn.click(lambda im, st, h: (gr.Accordion(open=True),) + gallery(im, st, h), [img_in, state, highlight],
-                       [acc, side, side_info])
-        highlight.change(gallery, [img_in, state, highlight], [side, side_info])
-        clear_btn.click(lambda: ({}, [], 'Runs cleared.'), None, [state, side, side_info])
-        vid_btn.click(on_video, [vid_in, model, conf, tiles], [vid_out, vid_table, vid_plot, vid_info])
+                    gr.HTML('<div class="sk-step">Side by side <span class="sk-hint">plays and seeks together with the original, fullscreen in the player</span></div>')
+                    vid_out = gr.Video(show_label=False, interactive=False, elem_classes='sk-sync', buttons=['download'])
+                    v_stats = gr.Markdown(elem_id='sk-stats')
+                    with gr.Row():
+                        v_table = gr.Dataframe(label='Objects per class (average per frame)', interactive=False)
+                        v_plot = gr.LinePlot(x='time_s', y='count', color='run', label='Objects per frame',
+                                             x_title='Time (s)', y_title='Count')
+
+        def on_models(sel, best):
+            first = (sel or default)[0]
+            return models_table_html(choices, sel), selected_table_html(sel), gr.Slider(value=best_conf(first)) if best else gr.Slider()
+
+        photo_in = [img_in, models, use_best, conf, sahi_mode, classes, p_high, p_sahi, pstate]
+        photo_out = [pstate, p_grid, p_stats, p_table, p_info]
+        view_in = [img_in, pstate, models, sahi_mode, classes, p_high, p_sahi]
+        view_out = [p_grid, p_stats, p_table, p_info]
+        video_in = [vid_in, models, use_best, conf, sahi_mode, classes, v_high, v_sahi, vstate]
+        video_out = [vstate, vid_out, v_stats, v_table, v_plot, v_info]
+        vview_in = [vid_in, vstate, models, sahi_mode, classes, v_high, v_sahi]
+        vview_out = [vid_out, v_stats, v_table, v_plot, v_info]
+
+        models.change(on_models, [models, use_best], [table_html, card, conf])
+        def on_best(b, sel):
+            # best-F1 on: the slider only shows the first model's value; off: the slider applies to every model
+            return gr.update(interactive=False, value=best_conf((sel or default)[0])) if b else gr.update(interactive=True)
+
+        use_best.change(on_best, [use_best, models], conf)
+        all_btn.click(lambda: NAMES, None, classes)
+        none_btn.click(lambda: [], None, classes)
+        img_btn.click(on_photo, photo_in, photo_out)
+        # display-only changes redraw from the saved detections, no model is run again
+        for comp in (models, sahi_mode, classes, p_high, p_sahi):
+            comp.change(photo_view, view_in, view_out)
+        vid_btn.click(on_video, video_in, video_out)
+        for comp in (classes, v_high, v_sahi):
+            comp.change(video_view, vview_in, vview_out)
     share = (PROFILE == 'colab') if share is None else share
     # running the cell again in a notebook: close the old app so the port is free
     if _DEMO:
@@ -2681,7 +2913,7 @@ def launch_demo(name=None, share=None):
     theme = gr.themes.Soft(primary_hue='indigo', secondary_hue='cyan', neutral_hue='slate', radius_size='lg',
                            font=[gr.themes.GoogleFont('Inter'), 'ui-sans-serif', 'system-ui', 'sans-serif'])
     # Recommended: on the server keep the default address and open it through an SSH tunnel
-    return app.launch(share=share, server_port=dc['server_port'], theme=theme, css=DEMO_CSS,
+    return app.launch(share=share, server_port=dc['server_port'], theme=theme, css=DEMO_CSS, head=SYNC_JS,
                       allowed_paths=[str(data_dir()), str(DOWNLOADS / 'samples'), str(SAMPLES), str(RESULTS)])
 
 

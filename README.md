@@ -177,9 +177,7 @@ What we found:
 
 ![SAHI on a crowded square](results/compare/sahi_1.png)
 
-The demo does the same live: run several models on one photo and they show up side by side, with the boxes only one model found in magenta (`results/screenshots/`):
-
-![Demo: three models side by side with differences highlighted](results/screenshots/ui_highlight.png)
+The demo does the same live: tick several models, run them on one photo or video, and they show up side by side (see [Demo](#demo)).
 
 What the pictures show: in the very crowded square both YOLOs hit their 300-box limit while D-FINE finds fewer people, but SAHI tiles close most of that gap for D-FINE (70 to 116 people in the zoomed area). On streets with cars and scooters D-FINE often finds the most objects.
 
@@ -268,22 +266,29 @@ Recommended: when you move to another machine, copy the `runs/`, `models/` and `
 
 #### Demo
 
-`python skyscout.py demo` (or `Demo.ipynb`) opens a web app for trying the models out. The scores were already measured in the evaluation step, the app shows them to help pick a model.
+`python skyscout.py demo` (or `Demo.ipynb`) opens a web app for trying the models out. The scores were already measured in the evaluation step, the app shows them to help pick models.
 
 ```mermaid
 flowchart LR
-    S[Settings panel<br/>model, confidence, SAHI<br/>+ model comparison table] --> I[Photo tab<br/>upload or pick a test photo]
-    S --> V[Video tab<br/>upload or pick a sample clip]
-    I --> R1[Boxes + count per class<br/>+ average confidence + time]
-    I --> R3[Side by side: every model run<br/>on this photo, differences in magenta]
-    V --> R2[Video with boxes + objects per frame<br/>+ chart over time + FPS]
+    S[Settings<br/>1 models, 2 confidence,<br/>3 SAHI, 4 classes] --> I[Photo tab]
+    S --> V[Video tab]
+    I --> R1[Side-by-side picture<br/>one column per model]
+    V --> R2[Side-by-side video<br/>synced with the original]
+    R1 & R2 --> T[Table per model: objects,<br/>only this model, SAHI adds, time]
 ```
 
-- **Settings (left):** pick a model, set the confidence (starts at the best-F1 value of that model) and turn on tiled inference (SAHI) for smaller objects. Under it, a table compares all models (mAP, AP small, F1, speed, best value in green) and a card lists every score of the selected model.
-- **Photo:** boxes in a color per class, a table with the count and average confidence per class, and the time.
-- **Side by side:** every model you run on the same photo is kept and shown next to the others. **Highlight differences** draws the boxes that only that model found in magenta (no box of another model overlaps it by 50% or more) and the shared ones in grey. A new photo starts a new comparison, **Clear runs** empties it.
-- **Video:** the video comes back with boxes, plus the average and highest count per class and a line chart of objects over time. Counts are per frame (no tracking), so a car seen in 10 frames counts 10 times.
+- **1 Models:** tick one or more. One click runs all of them.
+- **2 Confidence:** each model starts at its own best-F1 confidence (their score scales differ). Untick it to use the slider for every model. Left = more boxes (finds more, more false alarms), right = fewer, surer boxes (more precise, misses more).
+- **3 Tiled inference (SAHI):** off, on, or **Compare**, which runs every model with and without tiles (second row of the picture).
+- **4 Classes:** the box colors. Turn classes off to hide them everywhere (pictures, counts, comparisons) without running the models again.
+- Under the settings: a table of all models (best value per column in green) and every score of the selected models side by side.
+- **Side by side:** one column per model, a label above each window ("D-FINE + SAHI: 107 objects | 17 only here | SAHI adds 25") and a table below with one column per model in the same order. Fullscreen and download buttons sit at the top right of the picture (the video player has its own fullscreen).
+- **Highlight differences:** magenta = boxes only that model found, compared with the other models in the same row (no box of theirs overlaps it by 50% or more). Shared boxes turn grey.
+- **Show what SAHI adds:** lime = boxes found with tiles but not on the full image by the same model.
+- **Video:** the side-by-side result is one video, so all windows always play together, and the original plays, pauses and seeks together with it. The line chart shows objects per frame per model. Counts are per frame (no tracking), so a car seen in 10 frames counts 10 times.
 - **Samples:** 6 test photos and 3 real drone videos are in `samples/`. VisDrone2019-DET only has still photos (frames seconds apart), so the clips come from the separate VisDrone2019-VID set: download `VisDrone2019-VID-val.zip` (1.5 GB, link on the [VisDrone page](https://github.com/VisDrone/VisDrone-Dataset)) and run `python skyscout.py videos <path to the zip>` to make them again. Any other `.mp4` in `downloads/samples/` shows up as an example too.
+
+![Demo: three models with and without SAHI, differences in magenta, SAHI gains in lime](results/screenshots/ui_highlight.png)
 
 ![Demo video tab](results/screenshots/ui_video.png)
 
