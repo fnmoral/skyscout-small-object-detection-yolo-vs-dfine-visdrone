@@ -9,6 +9,7 @@ Terminal usage:
     python skyscout.py report
     python skyscout.py compare     (side-by-side figures of the main models)
     python skyscout.py samples     (test images + clip into samples/ for the demo)
+    python skyscout.py videos      (real demo clips from the VisDrone2019-VID zip into samples/)
     python skyscout.py pack        (zip the demo models to share, fetch downloads them again)
     python skyscout.py demo
 
@@ -2098,6 +2099,50 @@ def export_samples(split=None):
     log(f'samples: {len(list(SAMPLES.glob("*.jpg")))} images and {clip.name} in {rel(SAMPLES)}')
 
 
+def export_video_samples(zip_path=None):
+    '''Real video clips for the demo from the VisDrone2019-VID zip (read in place, not unpacked): the busiest
+    sequences from different scenes, saved to samples/ as short H.264 clips.'''
+    dc = CFG['demo']
+    zpath = Path(zip_path) if zip_path else DOWNLOADS / 'vid' / 'VisDrone2019-VID-val.zip'
+    if not zpath.exists():
+        print(f'{zpath.name} not found. Recommended: download VisDrone2019-VID-val.zip (see README) into downloads/vid/')
+        return []
+    import cv2
+    with zipfile.ZipFile(zpath) as z:
+        names = z.namelist()
+        frames = defaultdict(list)
+        for n in names:
+            if '/sequences/' in n and n.endswith('.jpg'):
+                frames[n.split('/sequences/')[1].split('/')[0]].append(n)
+        # objects per frame from the annotation files, to pick busy clips
+        busy = {}
+        for seq, fs in frames.items():
+            ann = [n for n in names if n.endswith(f'annotations/{seq}.txt')]
+            lines = z.read(ann[0]).decode().splitlines() if ann else []
+            busy[seq] = len(lines) / max(len(fs), 1)
+        stride = max(1, round(dc['clip_source_fps'] / dc['samples_clip_fps']))
+        need = dc['clip_seconds'] * dc['samples_clip_fps'] * stride
+        picked, scenes = [], set()
+        for seq in sorted(busy, key=busy.get, reverse=True):
+            scene = seq.split('_')[0]
+            if len(frames[seq]) >= need and scene not in scenes:
+                picked.append(seq)
+                scenes.add(scene)
+            if len(picked) == dc['video_clips']:
+                break
+        out = []
+        for seq in picked:
+            dst = SAMPLES / f'visdrone_vid_{seq}.mp4'
+            with video_writer(dst, dc['samples_clip_fps']) as w:
+                for n in sorted(frames[seq])[:need:stride]:
+                    img = cv2.imdecode(np.frombuffer(z.read(n), np.uint8), cv2.IMREAD_COLOR)
+                    w.append_data(even_resize(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), dc['samples_clip_width']))
+            out.append(dst)
+            print(f'{dst.name}: {busy[seq]:.0f} objects per frame, {dst.stat().st_size / 1e6:.1f} MB')
+    log(f'video samples: {len(out)} clips in {rel(SAMPLES)}')
+    return out
+
+
 def pack_models():
     '''Zip the demo models (config demo.pack_models) for sharing. D-FINE is saved without optimizer state (about 3x smaller).'''
     names = [resolve_name(n) for n in CFG['demo']['pack_models']]
@@ -2330,32 +2375,146 @@ def sample_videos():
     return kept + sorted(extra)
 
 
-def model_card(name):
-    '''Saved test-set scores for the selected model (the demo does not re-evaluate).'''
+def demo_label(name):
+    '''Friendly model name in the demo (report labels for the main models).'''
+    return CFG['report']['main_models'].get(name) or name
+
+
+def model_facts(name):
+    '''Saved test-set scores, one-GPU latency and train time of a model (read from results/, works without the dataset).'''
     split = CFG['evaluation']['report_split']
     m = metrics_for(name, split)
     if not m:
-        return f'`{name}` has no saved evaluation yet. Recommended: run `python skyscout.py eval {name}`'
-    # same numbers as the report: one-GPU latency, and train time including the run it continued from
+        return None
     entry = read_json(RESULTS / 'latency.json', {}).get(name)
-    lat, m['gpu'] = (entry['latency_ms'], entry['gpu']) if entry else (m['latency_ms'], m['gpu'])
-    # read from saved results (in git), so it also works when only the demo models were downloaded
+    lat = entry['latency_ms']['total'] if entry else m['latency_ms']['total']
     train_s = m.get('train_seconds') or 0
     if warm_start(name):
         train_s += (metrics_for(warm_start(name), split) or {}).get('train_seconds') or 0
-    return (f'**{name}** ({m["family"]}, {m["setup"]}, {m["imgsz"]} px) scored on the {split} split: '
-            f'mAP@50-95 **{100 * m["map50_95"]:.1f}%**, mAP@50 {100 * m["map50"]:.1f}%, AP small {100 * m["ap_small"]:.1f}%, '
-            f'precision {100 * m["precision"]:.1f}%, recall {100 * m["recall"]:.1f}%, F1 {100 * m["f1"]:.1f}%. '
-            f'{m["params"] / 1e6:.1f}M parameters, {lat["total"]:.0f} ms per image on {m["gpu"]}. '
-            f'Trained for {fmt_dur(train_s or None)} on {m.get("train_gpu") or "?"}.')
+    return {'mAP@50-95': 100 * m['map50_95'], 'mAP@50': 100 * m['map50'], 'AP small': 100 * m['ap_small'],
+            'Precision': 100 * m['precision'], 'Recall': 100 * m['recall'], 'F1': 100 * m['f1'],
+            'params': m['params'] / 1e6, 'gflops': m.get('gflops'), 'ms': lat, 'train_h': train_s / 3600,
+            'family': m['family'], 'setup': m['setup'], 'imgsz': m['imgsz'], 'conf': best_conf(name, split), 'split': split}
+
+
+def model_card_html(name):
+    '''Stats of the selected model as a two-column table.'''
+    f = model_facts(name)
+    if not f:
+        return f'<div class="sk-card">No saved evaluation for <b>{name}</b> yet.</div>'
+    kind = 'CNN, one-stage (YOLO)' if f['family'] == 'yolo' else 'Transformer, end-to-end (D-FINE)'
+    rows = [('Type', kind), ('Setup', f"{f['setup']}, {f['imgsz']} px"),
+            ('mAP@50-95', f"{f['mAP@50-95']:.1f}%"), ('mAP@50', f"{f['mAP@50']:.1f}%"),
+            ('AP small', f"{f['AP small']:.1f}%"), ('Precision', f"{f['Precision']:.1f}%"),
+            ('Recall', f"{f['Recall']:.1f}%"), ('F1', f"{f['F1']:.1f}%"), ('Parameters', f"{f['params']:.1f} M"),
+            ('GFLOPs', f"{f['gflops']:.1f}" if f['gflops'] else 'n/a'), ('Latency', f"{f['ms']:.0f} ms / image"),
+            ('Train time', f"{f['train_h']:.1f} h"), ('Best-F1 confidence', f"{f['conf']:.2f}")]
+    body = ''.join(f'<tr><td>{k}</td><td>{v}</td></tr>' for k, v in rows)
+    return (f'<div class="sk-card"><div class="sk-card-title">{demo_label(name)}</div>'
+            f'<table class="sk-kv">{body}</table>'
+            f'<div class="sk-note">Measured on the VisDrone {f["split"]} split, latency at batch 1.</div></div>')
+
+
+def models_table_html(names, selected):
+    '''All models side by side so the differences help pick one (best value per column in green).'''
+    facts = {n: model_facts(n) for n in names}
+    facts = {n: f for n, f in facts.items() if f}
+    if not facts:
+        return ''
+    cols = [('mAP@50-95', 'mAP', True, '{:.1f}'), ('AP small', 'AP small', True, '{:.1f}'),
+            ('F1', 'F1', True, '{:.1f}'), ('ms', 'ms', False, '{:.0f}')]
+    best = {c: (max if hi else min)(f[c] for f in facts.values()) for c, _, hi, _ in cols}
+    head = '<tr><th>Model</th>' + ''.join(f'<th>{t}</th>' for _, t, _, _ in cols) + '</tr>'
+    rows = ''
+    for n, f in facts.items():
+        cells = ''.join(f'<td class="{"best" if f[c] == best[c] else ""}">{fmt.format(f[c])}</td>' for c, _, _, fmt in cols)
+        rows += f'<tr class="{"sel" if n == selected else ""}"><td>{demo_label(n)}</td>{cells}</tr>'
+    return (f'<div class="sk-card"><div class="sk-card-title">Compare models</div><table class="sk-cmp">{head}{rows}</table>'
+            '<div class="sk-note">mAP = mAP@50-95, AP small = objects under 32 x 32 px, ms = latency per image. '
+            'Green = best in the column.</div></div>')
+
+
+def unique_boxes(runs, iou=0.5):
+    '''Per run: which boxes no other run found (no box of another run overlaps by IoU >= iou, any class).'''
+    out = {}
+    for k, r in runs.items():
+        others = [o['b'] for j, o in runs.items() if j != k and len(o['b'])]
+        if not len(r['b']) or not others:
+            out[k] = np.zeros(len(r['b']), bool)
+            continue
+        out[k] = box_iou(r['b'], np.concatenate(others)).max(1) < iou
+    return out
+
+
+def render_run(img, run, unique=None, max_w=1400):
+    '''Drawn detections of one run, shrunk for the gallery. With unique: shared boxes grey, boxes only this run found in magenta.'''
+    import cv2
+    s = min(1.0, max_w / img.shape[1])
+    small = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1 else img.copy()
+    b = run['b'] * s
+    if unique is None:
+        return draw_dets(small, b, run['s'], run['c'])
+    t = max(1, round(max(small.shape[:2]) / 900))
+    fill = small.copy()
+    for (x1, y1, x2, y2), u in zip(b.astype(int), unique):
+        if u:
+            cv2.rectangle(fill, (x1, y1), (x2, y2), (255, 0, 255), -1)
+        else:
+            cv2.rectangle(small, (x1, y1), (x2, y2), (190, 190, 190), 1)
+    out = cv2.addWeighted(fill, 0.35, small, 0.65, 0)
+    for (x1, y1, x2, y2), u in zip(b.astype(int), unique):
+        if u:
+            cv2.rectangle(out, (x1, y1), (x2, y2), (255, 0, 255), t + 1)
+    return out
+
+
+DEMO_CSS = '''
+.sk-header {padding: 20px 24px; border-radius: 18px; color: #fff;
+            background: linear-gradient(120deg, #312e81 0%, #4338ca 45%, #0e7490 100%)}
+.sk-header h1 {margin: 0; font-size: 1.7rem; font-weight: 700; color: #fff; letter-spacing: -0.01em}
+.sk-header p {margin: 6px 0 0; opacity: .88; font-size: .95rem; color: #fff}
+.sk-chips {margin-top: 10px}
+.sk-chips span {display: inline-block; padding: 3px 11px; margin: 0 6px 6px 0; border-radius: 999px;
+                background: rgba(255,255,255,.16); font-size: .78rem; color: #fff}
+.sk-panel {border: 1px solid var(--border-color-primary); border-radius: 18px; padding: 6px 10px;
+           background: var(--background-fill-secondary)}
+.sk-card {border: 1px solid var(--border-color-primary); border-radius: 14px; padding: 12px 14px;
+          background: var(--block-background-fill)}
+.sk-card-title {font-weight: 650; font-size: 1rem; margin-bottom: 8px}
+table.sk-kv, table.sk-cmp {width: 100%; border-collapse: collapse; font-size: .86rem; margin: 0}
+table.sk-kv td {padding: 5px 4px; border: 0; border-bottom: 1px solid var(--border-color-primary)}
+table.sk-kv tr:last-child td {border-bottom: 0}
+table.sk-kv td:first-child {color: var(--body-text-color-subdued)}
+table.sk-kv td:last-child {text-align: right; font-weight: 550; font-variant-numeric: tabular-nums}
+table.sk-cmp th {padding: 4px; border: 0; text-align: right; font-weight: 600; font-size: .74rem;
+                 color: var(--body-text-color-subdued); background: none}
+table.sk-cmp td {padding: 6px 4px; border: 0; border-top: 1px solid var(--border-color-primary); text-align: right;
+                 font-variant-numeric: tabular-nums}
+table.sk-cmp th:first-child, table.sk-cmp td:first-child {text-align: left}
+table.sk-cmp tr.sel td {background: var(--color-accent-soft); font-weight: 650}
+table.sk-cmp td.best {color: #16a34a; font-weight: 700}
+.sk-note {font-size: .74rem; color: var(--body-text-color-subdued); margin-top: 8px}
+.sk-legend span {display: inline-block; margin: 0 10px 4px 0; font-size: .8rem; white-space: nowrap}
+.sk-legend i {display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px}
+.sk-section {font-weight: 650; font-size: .95rem; margin: 4px 0 -4px}
+/* Gradio prose styles put borders on every table, the cards use row lines only */
+.sk-card tr {border: 0 !important}
+.sk-card table, .sk-card th, .sk-card td {border-left: 0 !important; border-right: 0 !important}
+.sk-card table {border-top: 0 !important; border-bottom: 0 !important}
+.sk-card tr:first-child th {border-top: 0 !important}
+/* model picker as a vertical list */
+.sk-models .wrap {display: flex !important; flex-direction: column; gap: 6px}
+.sk-models label {width: 100%; margin: 0 !important}
+'''
 
 
 _DEMO = []
 
 
 def launch_demo(name=None, share=None):
-    '''Gradio app: pick a model, run it on a drone photo or video, get boxes and counts per class.'''
+    '''Gradio app: pick a model, run it on a drone photo or video, get boxes and counts per class, compare runs side by side.'''
     import cv2
+    import hashlib
     import gradio as gr
     import pandas as pd
     dc = CFG['demo']
@@ -2366,20 +2525,49 @@ def launch_demo(name=None, share=None):
     scored = {n: (metrics_for(n, split) or {}).get('map50_95', -1) for n in choices}
     default = name or max(scored, key=scored.get)
     colors = {n: BOX_COLORS[k] for k, n in enumerate(NAMES)}
+    hint = 'Run one or more models on the same photo, they show up here side by side.'
 
-    def on_image(image, model_name, conf, tiles):
+    def image_key(image):
+        return hashlib.md5(np.ascontiguousarray(image[::7, ::7]).tobytes()).hexdigest()
+
+    def gallery(image, state, highlight):
+        runs = (state or {}).get('runs', {})
+        if image is None or not runs:
+            return [], hint
+        uniq = unique_boxes(runs) if highlight and len(runs) > 1 else {}
+        items, lines = [], ['| Run | Objects | Only this run | Time |', '|---|---|---|---|']
+        for k, r in runs.items():
+            u = uniq.get(k)
+            # short caption so it fits under a thumbnail, the table below has the full names
+            cap = f'{k.split(" (")[0]}{" + SAHI" if k.endswith("SAHI") else ""}: {len(r["b"])} objects' + (f' · {int(u.sum())} only here' if u is not None else '')
+            items.append((render_run(image, r, u), cap))
+            lines.append(f'| {k} | {len(r["b"])} | {int(u.sum()) if u is not None else "-"} | {r["ms"]:.0f} ms |')
+        if uniq:
+            note = 'Magenta = found by this run only (no box of another run overlaps it by 50% or more). Grey = also found by another run.'
+        elif len(runs) > 1:
+            note = 'Turn on "Highlight differences" to see the boxes that only one model found.'
+        else:
+            note = 'Run another model (or the same one with SAHI) on this photo to compare.'
+        return items, '\n'.join(lines) + '\n\n' + note + ' The first run of a model also includes loading it.'
+
+    def on_image(image, model_name, conf, tiles, state, highlight):
         if image is None:
-            return None, None, 'Upload or pick a drone image first.'
+            return None, None, 'Upload or pick a drone photo first.', state, [], hint
         runner = load_runner(model_name)
         t0 = time.perf_counter()
         (b, s, c), _ = detect(runner, image, conf, tiles)
         ms = (time.perf_counter() - t0) * 1e3
+        # runs are kept per photo, a different photo starts a new comparison
+        key = image_key(image)
+        if not state or state.get('key') != key:
+            state = {'key': key, 'runs': {}}
+        state['runs'][demo_label(model_name) + (' + SAHI' if tiles else '')] = {'b': b, 's': s, 'c': c, 'ms': ms}
         rows = [{'Class': NAMES[k], 'Count': int((c == k).sum()), 'Avg confidence': round(float(s[c == k].mean()), 2)}
                 for k in range(NC) if (c == k).any()]
         table = pd.DataFrame(sorted(rows, key=lambda r: -r['Count']), columns=['Class', 'Count', 'Avg confidence'])
         info = (f'**{len(c)} objects** in {len(rows)} classes, found by `{model_name}` in {ms:.0f} ms '
                 f'({"SAHI tiles" if tiles else "full image"}, confidence >= {conf:.2f}).')
-        return draw_dets(image, b, s, c), table, info
+        return (draw_dets(image, b, s, c), table, info, state) + gallery(image, state, highlight)
 
     def on_video(video, model_name, conf, tiles, progress=gr.Progress()):
         if not video:
@@ -2429,42 +2617,60 @@ def launch_demo(name=None, share=None):
             files = {im['id']: im['file_name'] for im in load_coco(split)['images']}
             img_examples = [[str(split_dir(split) / 'images' / files[i])] for i in sample_ids(split)]
     videos = sample_videos()
-    legend = ' '.join(f'<span style="color:{BOX_COLORS[k]}">&#9632;</span> {n}&nbsp;' for k, n in enumerate(NAMES))
+    legend = ''.join(f'<span><i style="background:{BOX_COLORS[k]}"></i>{n}</span>' for k, n in enumerate(NAMES))
+    chips = ''.join(f'<span>{lab}</span>' for n, lab in CFG['report']['main_models'].items() if n in choices)
+    chips += f'<span>{len(choices)} models</span><span>VisDrone2019</span>'
 
     with gr.Blocks(title='SkyScout') as app:
-        gr.Markdown('### SkyScout: small-object detection in drone images\n'
-                    'Pick a fine-tuned model, then try a drone photo or video. The scores below come from the saved '
-                    'test-set evaluation, this page is for trying the models out.')
-        with gr.Row():
-            model = gr.Dropdown(choices, value=default, label='Model', scale=2)
-            conf = gr.Slider(0.05, 0.95, value=best_conf(default), step=0.01, scale=2,
-                             label='Confidence threshold (starts at the best-F1 value of each model)')
-            tiles = gr.Checkbox(label='Tiled inference (SAHI), slower but finds smaller objects', scale=1)
-        card = gr.Markdown(model_card(default))
-        gr.HTML(f'<div style="font-size:0.9em">Box colors: {legend}</div>')
-        with gr.Tab('Image'):
-            with gr.Row():
-                img_in = gr.Image(type='numpy', label='Drone image')
-                img_out = gr.Image(label='Detections')
-            img_btn = gr.Button('Detect objects', variant='primary')
-            img_info = gr.Markdown()
-            img_table = gr.Dataframe(label='Objects per class', interactive=False)
-            if img_examples:
-                gr.Examples(img_examples, inputs=[img_in], label='Test-set images')
-        with gr.Tab('Video'):
-            with gr.Row():
-                vid_in = gr.Video(label='Drone video')
-                vid_out = gr.Video(label='Detections')
-            vid_btn = gr.Button('Detect objects in video', variant='primary')
-            vid_info = gr.Markdown(f'Recommended: keep clips short, at most {dc["video_max_frames"]} frames are processed.')
-            with gr.Row():
-                vid_table = gr.Dataframe(label='Objects per class', interactive=False)
-                vid_plot = gr.LinePlot(x='time_s', y='count', color='class', color_map=colors, label='Objects per frame',
-                                       x_title='Time (s)', y_title='Count')
-            if videos:
-                gr.Examples([[str(v)] for v in videos], inputs=[vid_in], label='Sample videos')
-        model.change(lambda n: (model_card(n), best_conf(n)), model, [card, conf])
-        img_btn.click(on_image, [img_in, model, conf, tiles], [img_out, img_table, img_info])
+        gr.HTML(f'<div class="sk-header"><h1>SkyScout</h1><p>Small-object detection in drone images: fine-tuned YOLO (CNN) '
+                f'vs D-FINE (transformer). Pick a model, try a photo or a video, and compare models side by side.</p>'
+                f'<div class="sk-chips">{chips}</div></div>')
+        with gr.Row(equal_height=False):
+            with gr.Column(scale=1, min_width=330, elem_classes='sk-panel'):
+                gr.HTML('<div class="sk-section">Settings</div>')
+                model = gr.Radio([(demo_label(n), n) for n in choices], value=default, label='Model', elem_classes='sk-models')
+                conf = gr.Slider(0.05, 0.95, value=best_conf(default), step=0.01, label='Confidence threshold',
+                                 info='Starts at the best-F1 value of each model')
+                tiles = gr.Checkbox(label='Tiled inference (SAHI)', info='Slower, but finds smaller objects')
+                table_html = gr.HTML(models_table_html(choices, default))
+                card = gr.HTML(model_card_html(default))
+                gr.HTML(f'<div class="sk-card"><div class="sk-card-title">Box colors</div><div class="sk-legend">{legend}</div></div>')
+            with gr.Column(scale=3):
+                with gr.Tab('Photo'):
+                    state = gr.State({})
+                    with gr.Row():
+                        img_in = gr.Image(type='numpy', label='Drone photo', height=430)
+                        img_out = gr.Image(label='Detections', height=430, interactive=False)
+                    img_btn = gr.Button('Detect objects', variant='primary', size='lg')
+                    img_info = gr.Markdown()
+                    img_table = gr.Dataframe(label='Objects per class', interactive=False)
+                    if img_examples:
+                        gr.Examples(img_examples, inputs=[img_in], label='Test-set photos (click one)')
+                    with gr.Accordion('Side by side: every model run on this photo', open=True) as acc:
+                        with gr.Row(equal_height=True):
+                            show_btn = gr.Button('Show side by side', size='sm')
+                            highlight = gr.Checkbox(label='Highlight differences', info='Magenta = boxes only this run found')
+                            clear_btn = gr.Button('Clear runs', size='sm')
+                        side = gr.Gallery(columns=3, height=360, object_fit='contain', allow_preview=True, show_label=False)
+                        side_info = gr.Markdown(hint, elem_id='sk-side-info')
+                with gr.Tab('Video'):
+                    with gr.Row():
+                        vid_in = gr.Video(label='Drone video', height=400)
+                        vid_out = gr.Video(label='Detections', height=400, interactive=False)
+                    vid_btn = gr.Button('Detect objects in video', variant='primary', size='lg')
+                    vid_info = gr.Markdown(f'Recommended: keep clips short, at most {dc["video_max_frames"]} frames are processed.')
+                    with gr.Row():
+                        vid_table = gr.Dataframe(label='Objects per class', interactive=False)
+                        vid_plot = gr.LinePlot(x='time_s', y='count', color='class', color_map=colors, label='Objects per frame',
+                                               x_title='Time (s)', y_title='Count')
+                    if videos:
+                        gr.Examples([[str(v)] for v in videos], inputs=[vid_in], label='Sample videos (click one)')
+        model.change(lambda n: (models_table_html(choices, n), model_card_html(n), best_conf(n)), model, [table_html, card, conf])
+        img_btn.click(on_image, [img_in, model, conf, tiles, state, highlight], [img_out, img_table, img_info, state, side, side_info])
+        show_btn.click(lambda im, st, h: (gr.Accordion(open=True),) + gallery(im, st, h), [img_in, state, highlight],
+                       [acc, side, side_info])
+        highlight.change(gallery, [img_in, state, highlight], [side, side_info])
+        clear_btn.click(lambda: ({}, [], 'Runs cleared.'), None, [state, side, side_info])
         vid_btn.click(on_video, [vid_in, model, conf, tiles], [vid_out, vid_table, vid_plot, vid_info])
     share = (PROFILE == 'colab') if share is None else share
     # running the cell again in a notebook: close the old app so the port is free
@@ -2472,15 +2678,17 @@ def launch_demo(name=None, share=None):
         with contextlib.suppress(Exception):
             _DEMO.pop().close()
     _DEMO.append(app)
+    theme = gr.themes.Soft(primary_hue='indigo', secondary_hue='cyan', neutral_hue='slate', radius_size='lg',
+                           font=[gr.themes.GoogleFont('Inter'), 'ui-sans-serif', 'system-ui', 'sans-serif'])
     # Recommended: on the server keep the default address and open it through an SSH tunnel
-    return app.launch(share=share, server_port=dc['server_port'],
+    return app.launch(share=share, server_port=dc['server_port'], theme=theme, css=DEMO_CSS,
                       allowed_paths=[str(data_dir()), str(DOWNLOADS / 'samples'), str(SAMPLES), str(RESULTS)])
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='SkyScout pipeline (settings in config.yaml)')
     p.add_argument('command', choices=['status', 'prepare', 'summary', 'time', 'train', 'eval', 'run', 'sahi',
-                                        'latency', 'all', 'report', 'compare', 'samples', 'pack', 'fetch', 'demo'])
+                                        'latency', 'all', 'report', 'compare', 'samples', 'videos', 'pack', 'fetch', 'demo'])
     p.add_argument('names', nargs='*', help='experiment names from config.yaml')
     p.add_argument('--split', help='val or test (default from config)')
     p.add_argument('--sahi', action='store_true', help='evaluate with tiled inference')
@@ -2506,6 +2714,8 @@ def main(argv=None):
         make_comparisons(a.split)
     elif a.command == 'samples':
         export_samples(a.split)
+    elif a.command == 'videos':
+        export_video_samples(a.names[0] if a.names else None)
     elif a.command == 'pack':
         pack_models()
     elif a.command == 'fetch':

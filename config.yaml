@@ -135,6 +135,11 @@ demo:
   clip_frames: 60         # sample clip made from one VisDrone test-dev sequence
   clip_fps: 2
   samples_clip_width: 960   # smaller copy of the clip saved in samples/ (kept in git)
+  # Real video clips from VisDrone2019-VID (python skyscout.py videos)
+  video_clips: 3
+  clip_seconds: 10
+  clip_source_fps: 30
+  samples_clip_fps: 15
   pack_models: [yolo11s_640, yolo26s_640, dfine_best_long_640]   # python skyscout.py pack
   # Trained demo models on the GitHub release, used by fetch_models() when models/ is empty
   models_url: https://github.com/fnmoral/skyscout-small-object-detection-yolo-vs-dfine-visdrone/releases/download/models-v1/skyscout_models.zip
