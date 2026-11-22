@@ -322,6 +322,8 @@ flowchart LR
 
 Stop the app with the stop button of the cell (or Runtime > Interrupt execution). Running the last cell again closes the old app first.
 
+Running the notebook again always loads the newest code from GitHub (the first cell prints the code version it uses), so there is no need to start a new session after an update.
+
 Recommended: if no free GPU is available, the demo still runs on CPU, only slower (a few seconds per image for D-FINE).
 
 **Using your own trained models.** After training, `python skyscout.py pack` writes `downloads/skyscout_models.zip` and prints its SHA-256 (YOLO checkpoints are cleaned: optimizer, file paths and time zone removed; D-FINE is saved without optimizer state). Put it on a release of your own copy and set `demo.models_url` and `demo.models_sha256` in `config.yaml`, or upload it to Google Drive and run `sk.fetch_models('/content/drive/MyDrive/skyscout_models.zip')` from `SkyScout.ipynb` (section 11) after mounting Drive.
