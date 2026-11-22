@@ -1650,7 +1650,9 @@ def make_report():
     head = ['Model', 'Setup', 'Input', 'mAP@50', 'mAP@50-95', 'APs', 'Precision', 'Recall', 'F1',
             'Params (M)', 'GFLOPs', 'Latency (ms)', 'NMS/post (ms)', 'Epochs', 'Train time (h)', 'Train GPU']
     table = []
-    for m in sorted(rows, key=lambda r: -r['map50_95']):
+    # same order everywhere: experiments as listed in config.yaml (YOLO11s, YOLO26s, D-FINE ...), SAHI right after its model
+    order = list(CFG['experiments'])
+    for m in sorted(rows, key=lambda r: (order.index(r['experiment']), r['sahi'])):
         ts = m.get('train_seconds')
         table.append([m['experiment'] + (' + SAHI' if m['sahi'] else ''), m['setup'], m['imgsz'],
                       f'{100 * m["map50"]:.2f}', f'{100 * m["map50_95"]:.2f}', f'{100 * m["ap_small"]:.2f}',

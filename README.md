@@ -21,12 +21,14 @@ flowchart LR
 
 #### The main question
 
-**Which finds small objects in drone photos better: a transformer detector or a CNN detector, and what does each one cost in speed and training time?**
+**Which finds small objects in drone photos better: CNN detectors (YOLO) or a transformer-based detector from the DETR family (D-FINE), and what does each one cost in speed and training time?**
 
 - CNN side: YOLO11s (baseline) and YOLO26s (newest YOLO)
-- Transformer side: D-FINE Small
+- Transformer side: D-FINE Small (CNN backbone + transformer encoder-decoder)
 
-D-FINE is not a pure transformer. It still uses a CNN backbone to pull features out of the image, then uses transformer attention and object queries to find the objects. "Transformer-based" means the part that does the detecting works with attention, while YOLO does that part with convolutions only.
+D-FINE is not a pure transformer. Like the other DETR-family detectors (DETR, Deformable DETR, RT-DETR), it uses a CNN backbone to pull features out of the image and then transformer attention with object queries to find the objects. All three models therefore start from a CNN backbone, and the comparison is about how objects are found: dense convolutional predictions (YOLO) against attention and object queries that output a set of boxes (D-FINE).
+
+Scope: pure transformer detectors (for example YOLOS, which uses only a ViT) and large vision-language models that can point at objects (for example Qwen2.5-VL) were left out. At the same small size pure transformer detectors are much less accurate and slower, especially on small objects, and vision-language models are hundreds of times bigger and take seconds per image, which does not fit real-time drone detection.
 
 Around the main question, the project also answers some smaller ones:
 
@@ -50,10 +52,12 @@ Short answer from the first run (details in [Results](#results-first-full-run)):
 | Model | Type in plain words | Why it is here |
 |---|---|---|
 | YOLO11s | A fast CNN that looks at the image once. Needs an extra clean-up step (NMS) to remove duplicate boxes | Baseline, same as the class example |
-| YOLO26s | The newest YOLO. Also looks once, but no clean-up step needed | Shows how much newer YOLO helps |
-| D-FINE Small | A transformer that treats detection as "fill in a list of objects". End-to-end, anchor-free, no clean-up step | The TensorFlow/Keras part of the project |
+| YOLO26s | The newest YOLO, a newer and more accurate CNN that also looks once. Run here with the same clean-up step (NMS) as YOLO11s | Shows how much newer YOLO helps |
+| D-FINE Small | A CNN backbone plus a transformer that treats detection as "fill in a list of objects". End-to-end, anchor-free, no clean-up step | The TensorFlow/Keras part of the project |
 
 All three are about the same size (around 10 million parameters), so the comparison is fair.
+
+YOLO26s also has a second, NMS-free head (one box per object, made for edge devices). Ultralytics only uses it when asked (`nms=False`), and this project ran YOLO26s in the default mode with NMS, so YOLO11s and YOLO26s are compared the same way. D-FINE is NMS-free by design.
 
 ```mermaid
 flowchart LR
@@ -61,14 +65,16 @@ flowchart LR
         direction TB
         y1[Image] --> y2[CNN backbone] --> y3[Many candidate boxes] --> y4[NMS removes duplicates] --> y5[Final boxes]
     end
-    subgraph Y26["YOLO26s (CNN, NMS-free)"]
+    subgraph Y26["YOLO26s (CNN)"]
         direction TB
-        n1[Image] --> n2[CNN backbone] --> n3[One box per object] --> n5[Final boxes]
+        n1[Image] --> n2[Newer CNN backbone] --> n3[Many candidate boxes] --> n4[NMS removes duplicates] --> n5[Final boxes]
     end
-    subgraph DF["D-FINE (transformer)"]
+    subgraph DF["D-FINE (CNN backbone + transformer)"]
         direction TB
         d1[Image] --> d2[CNN backbone] --> d3[Transformer encoder] --> d4[Decoder with<br/>300 object queries] --> d5[Final boxes]
     end
+    %% invisible links keep the order YOLO11s, YOLO26s, D-FINE from left to right
+    YOLO ~~~ Y26 ~~~ DF
 ```
 
 #### The data: VisDrone2019-DET
@@ -146,6 +152,7 @@ All 640 px runs were trained on one local GPU with shorter schedules (YOLO 50 ep
 | YOLO11s (baseline) | 28.9 | 16.6 | 7.5 | 9.4 | 21.7 | 21.7 | 1.3 |
 | YOLO26s (newest YOLO) | **30.6** | **17.5** | 8.2 | 10.0 | 22.8 | 24.1 | 1.6 |
 | D-FINE fine-tuned (6 + 10 epochs) | 29.3 | 17.2 | **8.8** | 10.3 | 27.1 | 138.5 | 6.9 |
+| YOLO11s + SAHI | 35.5 | 20.4 | 12.1 | 9.4 | 21.7 | 85.8 | 1.3 |
 | YOLO26s + SAHI | 37.0 | 21.0 | 12.9 | 10.0 | 22.8 | 89.1 | 1.6 |
 | D-FINE + SAHI | 33.3 | 19.4 | 11.5 | 10.3 | 27.1 | 413.9 | 6.9 |
 

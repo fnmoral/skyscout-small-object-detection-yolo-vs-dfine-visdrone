@@ -136,3 +136,6 @@
 [2026-11-22 07:03:13] [local] comparison figures: 13 in results/compare
 [2026-11-22 07:03:17] [local] samples: 6 images and visdrone_testdev_clip.mp4 in samples
 [2026-11-22 07:07:06] [local] packed 3 models into downloads/skyscout_models.zip (82 MB)
+[2026-11-22 08:04:55] [local] packed 3 models into downloads/skyscout_models.zip (82 MB), sha256 00fc1f125711172588af11703c55b45c438896050970eb1df0ead3fbeb6cddef
+[2026-11-22 08:06:05] [local] packed 3 models into downloads/skyscout_models.zip (82 MB), sha256 dfb347ce06074d6f55a812b0dd9230ef1dd28900cdefb9390f84c5de268021a2
+[2026-11-22 09:09:27] [local] video samples: 3 clips in samples
