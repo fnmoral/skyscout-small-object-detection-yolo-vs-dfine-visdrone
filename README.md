@@ -278,11 +278,12 @@ flowchart LR
 ```
 
 - **1 Models:** tick one or more. One click runs all of them.
-- **2 Confidence:** each model starts at its own best-F1 confidence (their score scales differ). Untick it to use the slider for every model. Left = more boxes (finds more, more false alarms), right = fewer, surer boxes (more precise, misses more).
-- **3 Tiled inference (SAHI):** off, on, or **Compare**, which runs every model with and without tiles (second row of the picture).
+- **2 Confidence:** one slider per selected model, each starting at that model's best value (best F1 on the test set, the score scales differ between models). Tick **Same confidence for all models** for one shared slider, **Reset to best values** puts them back. Left = more boxes (finds more, more false alarms), right = fewer, surer boxes (more precise, misses more).
+- **3 Tiled inference (SAHI):** cuts the image into overlapping zoomed-in tiles, runs the model on each tile and on the whole image, then joins the boxes. Off, on, or **Compare**, which runs every model with and without tiles (second row of the picture).
 - **4 Classes:** the box colors. Turn classes off to hide them everywhere (pictures, counts, comparisons) without running the models again.
 - Under the settings: a table of all models (best value per column in green) and every score of the selected models side by side.
 - **Side by side:** one column per model, a label above each window ("D-FINE + SAHI: 107 objects | 17 only here | SAHI adds 25") and a table below with one column per model in the same order. Fullscreen and download buttons sit at the top right of the picture (the video player has its own fullscreen).
+- **Saved results:** every result is kept per model, SAHI setting and confidence. Going back to a setting you already ran shows it at once (also the drawn video), only new settings need **Detect objects**. **Re-detect** runs everything again.
 - **Highlight differences:** magenta = boxes only that model found, compared with the other models in the same row (no box of theirs overlaps it by 50% or more). Shared boxes turn grey.
 - **Show what SAHI adds:** lime = boxes found with tiles but not on the full image by the same model.
 - **Video:** the side-by-side result is one video, so all windows always play together, and the original plays, pauses and seeks together with it. The line chart shows objects per frame per model. Counts are per frame (no tracking), so a car seen in 10 frames counts 10 times.
