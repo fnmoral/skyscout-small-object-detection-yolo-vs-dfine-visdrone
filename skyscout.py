@@ -2385,6 +2385,14 @@ def short_label(name, sahi=False):
     return demo_label(name).split(' (')[0] + (' + SAHI' if sahi else '')
 
 
+def model_badge(name):
+    '''Monogram, badge color and architecture of a model in the demo.'''
+    if experiment(name)['family'] == 'yolo':
+        ver = ''.join(ch for ch in name.split('_')[0] if ch.isdigit())
+        return f'Y{ver}', '#2563eb' if ver == '11' else '#0891b2', 'CNN \\00b7  one-stage'
+    return 'DF', '#7c3aed', 'CNN backbone + Transformer'
+
+
 def model_facts(name):
     '''Saved test-set scores, one-GPU latency and train time of a model (read from results/, works without the dataset).'''
     split = CFG['evaluation']['report_split']
@@ -2632,7 +2640,7 @@ table.sk-abbr td {padding: 1px 4px 1px 0; border: 0 !important; vertical-align: 
 table.sk-abbr td:first-child {white-space: nowrap; font-weight: 600; color: var(--body-text-color); width: 1%; padding-right: 10px}
 table.sk-abbr td.best {color: #16a34a}
 .sk-selchip {background: var(--color-accent-soft); padding: 0 4px; border-radius: 4px}
-.sk-desc {font-size: .78rem; line-height: 1.35; color: var(--body-text-color-subdued); margin: -2px 2px 0}
+.sk-desc {font-size: .78rem; line-height: 1.4; color: var(--body-text-color-subdued); margin: 6px 4px 2px 32px}
 .sk-key {display: flex; flex-wrap: wrap; gap: 14px; font-size: .82rem; margin: 2px 0}
 .sk-key span {display: inline-flex; align-items: center; gap: 6px}
 .sk-key i {display: inline-block; width: 14px; height: 14px; border-radius: 3px}
@@ -2658,8 +2666,30 @@ table.sk-abbr td.best {color: #16a34a}
 .sk-res .sk-note {padding: 6px 12px 9px; margin: 0; border-top: 1px solid var(--border-color-primary)}
 .sk-res-title {font-weight: 650; font-size: .9rem; margin: 6px 2px 6px}
 .sk-dot {display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 7px; vertical-align: 0}
-#sk-conf .block {background: var(--block-background-fill)}
+/* confidence: one clean card, slim sliders without the repeated min/max numbers */
+#sk-conf {border: 1px solid var(--border-color-primary); border-radius: 14px; background: var(--block-background-fill);
+          padding: 8px 14px 12px !important; gap: 2px !important}
+#sk-conf > .block, #sk-conf .block {border: 0 !important; box-shadow: none !important; background: transparent !important;
+          padding: 6px 0 !important; margin: 0 !important}
+#sk-conf .form {border: 0 !important; box-shadow: none !important; background: transparent !important; gap: 4px !important}
+#sk-conf .min_value, #sk-conf .max_value {display: none}
+#sk-conf .head {margin-bottom: 2px}
+#sk-conf .head span[data-testid=block-info] {font-size: .86rem; font-weight: 550}
+#sk-conf input[type=number] {width: 58px; text-align: center; font-weight: 650; font-variant-numeric: tabular-nums;
+          border-radius: 8px; padding: 2px 4px}
+#sk-conf .reset-button {opacity: .55}
+#sk-conf .reset-button:hover {opacity: 1}
 #sk-conf input[type=range] {accent-color: var(--color-accent)}
+.sk-scale2 {margin-top: 6px}
+.sk-scale2 .bar {height: 4px; border-radius: 4px; background: linear-gradient(90deg, #f59e0b 0%, #a3a3a3 50%, #6366f1 100%); opacity: .7}
+.sk-scale2 .ends {display: flex; justify-content: space-between; font-size: .72rem; color: var(--body-text-color-subdued); margin-top: 4px}
+/* models: a badge in front of each name and the architecture under it (set per model in launch_demo) */
+#sk-models label span {line-height: 1.25}
+#sk-models label span::before {display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 22px;
+          border-radius: 6px; color: #fff; font-size: .68rem; font-weight: 750; letter-spacing: .02em; margin-right: 10px;
+          vertical-align: middle}
+#sk-models label span::after {display: block; font-size: .72rem; font-weight: 400; color: var(--body-text-color-subdued);
+          margin: 1px 0 0 44px}
 '''
 # one colored square per class in the class filter, same colors as the boxes
 DEMO_CSS += ''.join(f'#sk-classes label:nth-child({k + 1}) span::before {{content: ""; display: inline-block; width: 10px; '
@@ -2910,20 +2940,18 @@ def launch_demo(name=None, share=None):
                 gr.HTML('<div class="sk-step"><b>1</b>Models</div>')
                 models = gr.CheckboxGroup([(demo_label(n), n) for n in choices], value=default, show_label=False,
                                           elem_id='sk-models', elem_classes='sk-box')
-                gr.HTML('<div class="sk-step"><b>2</b>Confidence</div>')
-                with gr.Group(elem_id='sk-conf'):
-                    gr.HTML('<div class="sk-scale"><span>&larr; <b>More boxes</b><br>finds more, more false alarms</span>'
-                            '<span><b>Fewer, surer boxes</b> &rarr;<br>more precise, misses more</span></div>')
-                    with gr.Row(equal_height=True):
-                        same = gr.Checkbox(value=False, label='Same confidence for all models', scale=3,
-                                           info='Off: each model starts at its best value')
-                        reset = gr.Button('Reset to best', size='sm', scale=1, min_width=90)
+                gr.HTML('<div class="sk-step"><b>2</b>Confidence</div>'
+                        '<div class="sk-desc">Each model starts at its best value, &#8634; puts it back.</div>')
+                with gr.Column(elem_id='sk-conf'):
+                    same = gr.Checkbox(value=False, label='Same value for all models')
                     shared = gr.Slider(0.05, 0.95, value=best_conf(default[0]), step=0.01, label='All models', visible=False)
-                    sliders = [gr.Slider(0.05, 0.95, value=best_conf(n), step=0.01, label=demo_label(n), visible=n in default)
+                    sliders = [gr.Slider(0.05, 0.95, value=best_conf(n), step=0.01, label=short_label(n), visible=n in default)
                                for n in choices]
+                    gr.HTML('<div class="sk-scale2"><div class="bar"></div><div class="ends">'
+                            '<span>&larr; more boxes, more false alarms</span><span>fewer, surer boxes &rarr;</span></div></div>')
                 gr.HTML('<div class="sk-step"><b>3</b>Tiled inference (SAHI)</div>'
-                        '<div class="sk-desc">Cuts the image into overlapping zoomed-in tiles, runs the model on every tile '
-                        'and on the whole image, then joins the boxes. Finds more tiny objects, but is 3 to 4 times slower.</div>')
+                        '<div class="sk-desc">Splits the image into zoomed-in tiles so tiny objects get found. '
+                        'Finds more, but about 3x slower.</div>')
                 sahi_mode = gr.Radio(sahi_modes, value='Off', show_label=False, elem_id='sk-sahi', elem_classes='sk-box')
                 gr.HTML('<div class="sk-step"><b>4</b>Classes</div>')
                 with gr.Group():
@@ -2994,8 +3022,6 @@ def launch_demo(name=None, share=None):
         models.change(lambda sel: (models_table_html(choices, sel), selected_table_html(sel)), models, [table_html, card])
         models.change(show_sliders, [models, same], [shared] + sliders)
         same.change(show_sliders, [models, same], [shared] + sliders)
-        reset.click(lambda sel: [gr.update(value=best_conf((sel or default)[0]))] + [gr.update(value=best_conf(n)) for n in choices],
-                    models, [shared] + sliders)
         all_btn.click(lambda: NAMES, None, classes)
         none_btn.click(lambda: [], None, classes)
         def photo_go(*a, progress=gr.Progress()):
@@ -3038,7 +3064,11 @@ def launch_demo(name=None, share=None):
                       checkbox_label_text_color_selected_dark='*primary_100', checkbox_label_border_color_selected_dark='*primary_500',
                       checkbox_label_shadow='none')
     # Recommended: on the server keep the default address and open it through an SSH tunnel
-    return app.launch(share=share, server_port=dc['server_port'], theme=theme, css=DEMO_CSS, head=SYNC_JS,
+    # badge and architecture tag for each model in the list, in list order
+    model_css = ''.join(f'#sk-models label:nth-child({i + 1}) span::before {{content: "{b}"; background: {c}}}\n'
+                        f'#sk-models label:nth-child({i + 1}) span::after {{content: "{t}"}}\n'
+                        for i, (b, c, t) in enumerate(map(model_badge, choices)))
+    return app.launch(share=share, server_port=dc['server_port'], theme=theme, css=DEMO_CSS + model_css, head=SYNC_JS,
                       allowed_paths=[str(data_dir()), str(DOWNLOADS / 'samples'), str(SAMPLES), str(RESULTS)])
 
 

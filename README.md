@@ -278,7 +278,7 @@ flowchart LR
 ```
 
 - **1 Models:** tick one or more. One click runs all of them.
-- **2 Confidence:** one slider per selected model, each starting at that model's best value (best F1 on the test set, the score scales differ between models). Tick **Same confidence for all models** for one shared slider, **Reset to best** puts them back. Left = more boxes (finds more, more false alarms), right = fewer, surer boxes (more precise, misses more).
+- **2 Confidence:** one slider per selected model, each starting at that model's best value (best F1 on the test set, the score scales differ between models). Tick **Same value for all models** for one shared slider, the ↺ button of a slider puts it back to the best value. Left = more boxes (finds more, more false alarms), right = fewer, surer boxes (more precise, misses more).
 - **3 Tiled inference (SAHI):** cuts the image into overlapping zoomed-in tiles, runs the model on each tile and on the whole image, then joins the boxes. Off, on, or **Compare**, which runs every model with and without tiles (second row of the picture).
 - **4 Classes:** the box colors. Turn classes off to hide them everywhere (pictures, counts, comparisons) without running the models again.
 - Under the settings: a table of all models (best value per column in green) and every score of the selected models side by side.
