@@ -49,11 +49,11 @@ Short answer from the first run (details in [Results](#results-first-full-run)):
 
 #### The three detectors
 
-| Model | Type in plain words | Why it is here |
-|---|---|---|
-| YOLO11s | A fast CNN that looks at the image once. Needs an extra clean-up step (NMS) to remove duplicate boxes | Baseline, same as the class example |
-| YOLO26s | The newest YOLO, a newer and more accurate CNN that also looks once. Run here with the same clean-up step (NMS) as YOLO11s | Shows how much newer YOLO helps |
-| D-FINE Small | A CNN backbone plus a transformer that treats detection as "fill in a list of objects". End-to-end, anchor-free, no clean-up step | The TensorFlow/Keras part of the project |
+| Model | Detector type | Type in plain words | Why it is here |
+|---|---|---|---|
+| YOLO11s | One-stage, anchor-free CNN | A fast CNN that looks at the image once. Needs an extra clean-up step (NMS) to remove duplicate boxes | Baseline, same as the class example |
+| YOLO26s | One-stage, anchor-free CNN | The newest YOLO, a newer and more accurate CNN that also looks once. Run here with the same clean-up step (NMS) as YOLO11s | Shows how much newer YOLO helps |
+| D-FINE Small | End-to-end, anchor-free transformer detector (DETR family) | A CNN backbone plus a transformer that treats detection as "fill in a list of objects". No clean-up step | The TensorFlow/Keras part of the project |
 
 All three are about the same size (around 10 million parameters), so the comparison is fair.
 
@@ -77,10 +77,135 @@ flowchart LR
     YOLO ~~~ Y26 ~~~ DF
 ```
 
+#### One-stage, two-stage and end-to-end detectors
+
+- **Two-stage detectors** first suggest regions that might hold an object (region proposals), then classify and fine-tune each region. Accurate but slower. This is the R-CNN family.
+- **One-stage detectors** skip the proposals and predict boxes and classes for every position of a grid in one pass, then remove duplicate boxes with NMS. Fast. YOLO11s and YOLO26s are one-stage.
+- **End-to-end (set prediction) detectors** use a fixed set of learned object queries. Each query becomes at most one object, so there are no proposals and no NMS. D-FINE belongs to this DETR family, which is why it is described as an end-to-end detector and not as one-stage or two-stage.
+
+| Model | Type | Region proposals | Feature extraction | Duplicate removal | Main idea |
+|---|---|---|---|---|---|
+| R-CNN | Two-stage | Selective search (about 2,000 regions) | CNN run on every region | NMS | First detector built on CNN features |
+| Fast R-CNN | Two-stage | Selective search | CNN once per image, RoI pooling | NMS | Shared feature map |
+| Faster R-CNN | Two-stage | Learned region proposal network (RPN) | CNN once per image | NMS | Proposals are learned too |
+| Mask R-CNN | Two-stage | RPN | CNN once per image, RoIAlign | NMS | Adds object masks |
+| YOLO11s | One-stage | None, dense predictions on 3 grids | CNN once per image | NMS | One fast pass, anchor-free |
+| YOLO26s | One-stage | None, dense predictions on 3 grids | CNN once per image | NMS (as run here, an NMS-free head exists) | Newer blocks, simpler box output |
+| D-FINE | End-to-end (DETR family) | None, 300 learned object queries | CNN once, then a transformer | None needed | Attention and queries give one box per object, box edges refined step by step |
+
+```mermaid
+flowchart LR
+    subgraph TS["Two-stage"]
+        direction LR
+        r1[R-CNN] --> r2[Fast R-CNN] --> r3[Faster R-CNN] --> r4[Mask R-CNN]
+    end
+    subgraph OS["One-stage"]
+        direction LR
+        o1[YOLO11s] --> o2[YOLO26s]
+    end
+    subgraph EE["End-to-end"]
+        direction LR
+        e1[DETR] --> e2[Deformable DETR] --> e3[RT-DETR] --> e4[D-FINE]
+    end
+    TS ~~~ OS ~~~ EE
+```
+
+#### Inside the models: CNN building blocks
+
+Checked by counting the layers of the trained models (YOLO in PyTorch, D-FINE in Keras), not taken from papers.
+
+| Concept | YOLO11s | YOLO26s | D-FINE (HGNetV2 backbone + hybrid encoder) |
+|---|---|---|---|
+| Depthwise convolution | Yes: classification branch of the head and the attention block (7 layers) | Yes: same places, two heads (14 layers) | Yes: 5 x 5 depthwise in the light blocks, 3 x 3 depthwise in the down-sampling layers (14 layers) |
+| Pointwise convolution (1 x 1) | Yes (46 layers) | Yes (67 layers) | Yes (59 layers) |
+| Depthwise separable convolution | Yes: head classification branch (3 x 3 depthwise, then 1 x 1) | Yes: same | Yes: light blocks (1 x 1, then 5 x 5 depthwise) and down-sampling (1 x 1, then 3 x 3 depthwise with stride 2) |
+| Residual connections | Yes: every bottleneck inside the C3k2 blocks adds its input back (11) | Yes (13) | Yes: around every attention and feed-forward layer of the transformer. The backbone mostly joins features by concatenation instead |
+| Bottleneck blocks | Yes: bottlenecks inside C3k2 (CSP design) | Yes | Partly: CSP layers built from RepVGG blocks (3 x 3 and 1 x 1 branches added together) |
+| Inverted residual blocks | No | No | No |
+| Linear bottlenecks | No | No | No |
+| Squeeze-and-Excitation | No | No | No: HGNetV2 has "squeeze" and "excitation" 1 x 1 convolutions after concatenation, but no global pooling and gating, so it is not SE |
+| Compound scaling | Partly: the n/s/m/l/x sizes scale depth and width together (s = 0.5 depth, 0.5 width), input size is set separately | Partly: same | Partly: the N/S/M/L/X sizes scale backbone and encoder together |
+| Inception modules | No | No | No |
+| Factorized convolutions | No: only 3 x 3 and 1 x 1 (depthwise separable is the only kind of factorizing) | No | No: 1 x 1, 2 x 2, 3 x 3 and 5 x 5 kernels |
+| Other notable parts | SPPF (pooling at several sizes), C2PSA (a small attention block) | Same as YOLO11s, box output without DFL (reg_max 1) | Learnable affine blocks, deformable attention, fine-grained box refinement (FDR) |
+
+#### Why a CNN backbone + transformer and not a Vision Transformer
+
+- **Patches are too big for tiny objects.** A Vision Transformer (ViT) cuts the image into 16 x 16 pixel patches. Most VisDrone objects are under 32 x 32 pixels, so many of them cover one patch or less and their detail is mixed away in the first step.
+- **Only one scale.** A plain ViT gives one feature map. Detecting tiny and large objects needs several scales, which the CNN gives for free (stride 8, 16 and 32).
+- **Cost grows fast with image size.** Self-attention compares every patch with every other patch, so the cost grows with the square of the number of patches. Drone photos are large, a CNN grows only linearly.
+- **Small ViT detectors are weak.** ViTs need very large pretraining data, and at this size a pure ViT detector (YOLOS-Tiny) is far less accurate than D-FINE-S.
+- **The hybrid keeps the best of both.** The CNN backbone does the cheap local and multi-scale work, and the transformer is used only where it helps: global context on the smallest feature map, and object queries that give one box per object without NMS. D-FINE's deformable attention looks at a few points per query, which keeps it fast.
+
+#### How a photo or video goes through each model
+
+YOLO11s and YOLO26s (as run in this project):
+
+```mermaid
+flowchart TB
+    subgraph PRE["Pre-processing"]
+        direction LR
+        a[Photo or video frame] --> b[Letterbox: long side to 640,<br/>keep the shape, pad] --> c[Pixels scaled to 0-1, RGB]
+    end
+    subgraph NET["Model"]
+        direction LR
+        d[CNN backbone<br/>Conv, C3k2, SPPF, C2PSA] --> e[Neck FPN + PAN<br/>3 scales: stride 8, 16, 32] --> f[Detect head: box + class per<br/>grid cell, about 8,400 candidates]
+    end
+    subgraph POST["Post-processing"]
+        direction LR
+        g[Confidence threshold] --> h[NMS removes duplicates] --> i[Up to 300 boxes, scaled<br/>back to the original size]
+    end
+    PRE --> NET --> POST
+```
+
+D-FINE:
+
+```mermaid
+flowchart TB
+    subgraph PRE["Pre-processing"]
+        direction LR
+        a[Photo or video frame] --> b[Resize to 640 x 640] --> c[Pixel scaling from the preset]
+    end
+    subgraph NET["Model"]
+        direction LR
+        d[HGNetV2 CNN backbone<br/>3 feature maps] --> e[Hybrid encoder: attention on<br/>the smallest map + CNN fusion] --> f[Decoder: 300 object queries,<br/>3 layers, deformable attention,<br/>box edges refined as distributions]
+    end
+    subgraph POST["Post-processing"]
+        direction LR
+        g[Sigmoid scores, best<br/>300 query-class pairs] --> h[Confidence threshold] --> i[Boxes scaled back to the<br/>original size, no NMS]
+    end
+    PRE --> NET --> POST
+```
+
+SAHI tiled inference (any model):
+
+```mermaid
+flowchart LR
+    a[Photo or frame] --> b[Overlapping 640 x 640 tiles<br/>25% overlap + the whole photo] --> c[Model pipeline above<br/>on every tile] --> d[Tile boxes shifted back<br/>to photo coordinates] --> e[Class-wise NMS, IoU 0.6:<br/>one box per object across tiles] --> f[Final boxes]
+```
+
+Video (demo):
+
+```mermaid
+flowchart LR
+    a[Video file] --> b[Read frame by frame] --> c[Each frame through the<br/>chosen pipeline, every model] --> d[Class filter, boxes drawn,<br/>counted per class] --> e[Windows placed side by side,<br/>labels with counts] --> f[H.264 MP4 + counts per frame<br/>+ chart over time]
+```
+
 #### The data: VisDrone2019-DET
 
 - About 10,000 drone photos from Chinese cities, mostly around 2000 x 1500 pixels
-- 10 classes: pedestrian, people, bicycle, car, van, truck, tricycle, awning-tricycle, bus, motor
+- The raw annotations have 12 categories: ignored regions (0), pedestrian, people, bicycle, car, van, truck, tricycle, awning-tricycle, bus, motor and others (11)
+- **10 classes are used**: pedestrian, people, bicycle, car, van, truck, tricycle, awning-tricycle, bus, motor. "Ignored regions" (areas too crowded or unclear to label) and "others" are dropped, and so are boxes the dataset marks to be ignored (score 0)
+- Pedestrian is a person standing or walking, people is a person in another pose (sitting, lying, riding)
+
+| | Classes |
+|---|---|
+| VisDrone raw annotations | 12 categories |
+| Used for training and scoring | 10 (ignored regions and others removed) |
+| Pretrained models before fine-tuning | 80 COCO classes (D-FINE was pretrained on Objects365 first, then COCO) |
+| Fine-tuned models | 10 VisDrone classes: the 80-class output layer is replaced by a new 10-class layer |
+
+COCO already has person, bicycle, car, motorcycle, bus and truck, so the pretrained features help. VisDrone splits person into pedestrian and people and adds van, tricycle and awning-tricycle, which is one reason the output layer is trained again.
 - Most objects are smaller than 32 x 32 pixels, which is what makes this dataset hard. The exact counts per split and class are written to `results/dataset_summary.md` when the data is prepared.
 
 #### What we test
