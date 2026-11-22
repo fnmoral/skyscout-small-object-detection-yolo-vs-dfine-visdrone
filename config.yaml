@@ -136,5 +136,7 @@ demo:
   clip_fps: 2
   samples_clip_width: 960   # smaller copy of the clip saved in samples/ (kept in git)
   pack_models: [yolo11s_640, yolo26s_640, dfine_best_long_640]   # python skyscout.py pack
-  models_url: ''            # link to skyscout_models.zip, used by fetch_models() when models/ is empty
+  # Trained demo models on the GitHub release, used by fetch_models() when models/ is empty
+  models_url: https://github.com/fnmoral/skyscout-small-object-detection-yolo-vs-dfine-visdrone/releases/download/models-v1/skyscout_models.zip
+  models_sha256: dfb347ce06074d6f55a812b0dd9230ef1dd28900cdefb9390f84c5de268021a2   # zip is only unpacked if it matches
   sample_video_urls: []   # optional extra .mp4 links, saved to downloads/samples

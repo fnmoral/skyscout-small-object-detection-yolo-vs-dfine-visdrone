@@ -2107,17 +2107,57 @@ def pack_models():
     tmp.mkdir(exist_ok=True)
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_STORED) as z:
         for n in names:
-            src = model_path(n)
+            src, small = model_path(n), tmp / model_path(n).name
             if experiment(n)['family'] == 'dfine':
-                small = tmp / src.name
                 load_runner(n).det.save_weights(str(small))
                 _RUNNERS.pop(n, None)
-                src = small
-            z.write(src, f'models/{model_path(n).name}')
+            else:
+                clean_yolo_checkpoint(src, small)
+            z.write(small, f'models/{src.name}')
             z.write(MODELS / f'{n}.json', f'models/{n}.json')
     shutil.rmtree(tmp, ignore_errors=True)
-    log(f'packed {len(names)} models into {rel(out)} ({out.stat().st_size / 1e6:.0f} MB)')
+    log(f'packed {len(names)} models into {rel(out)} ({out.stat().st_size / 1e6:.0f} MB), sha256 {sha256(out)}')
     return out
+
+
+def sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def clean_yolo_checkpoint(src, dst):
+    '''Copy of a YOLO checkpoint for sharing: EMA weights only, no optimizer, no machine paths or time zone.'''
+    import torch
+    ck = torch.load(src, map_location='cpu', weights_only=False)
+    ck['model'] = (ck['ema'] if ck.get('ema') is not None else ck['model']).half()
+    for k in ('ema', 'optimizer', 'scaler', 'updates', 'git', 'train_results'):
+        ck.pop(k, None)
+
+    def scrub(v):
+        # absolute paths become file names, so the checkpoint does not show where it was trained
+        if isinstance(v, str) and (v.startswith('/') or ':\\' in v or ':/' in v):
+            return Path(v).name
+        if isinstance(v, dict):
+            return {k: scrub(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return type(v)(scrub(x) for x in v)
+        return v
+
+    ck['train_args'] = scrub(ck.get('train_args', {}))
+    # the model object keeps its own copy of the train args and the path of the starting weights
+    m = ck['model']
+    if isinstance(getattr(m, 'args', None), dict):
+        m.args = scrub(m.args)
+    for attr in ('pt_path', 'yaml_file'):
+        if isinstance(getattr(m, attr, None), str):
+            setattr(m, attr, scrub(getattr(m, attr)))
+    ck['date'] = str(ck.get('date', ''))[:10]
+    torch.save(ck, dst)
+    return dst
 
 
 def fetch_models(url=None):
@@ -2131,6 +2171,12 @@ def fetch_models(url=None):
         print('No trained models found. Recommended: copy them into models/ or set demo.models_url in config.yaml')
         return None
     zpath = Path(url) if Path(url).exists() else download(url, DOWNLOADS / 'skyscout_models.zip')
+    # .pt files are pickles, so only unpack the exact zip that was published
+    want = CFG['demo'].get('models_sha256')
+    if want and sha256(zpath) != want:
+        if zpath.parent == DOWNLOADS:
+            zpath.unlink()
+        raise ValueError(f'{zpath.name} does not match demo.models_sha256, not unpacked. Recommended: download it again')
     with zipfile.ZipFile(zpath) as z:
         z.extractall(ROOT)
     print(f'Models ready: {", ".join(n for n in names if model_path(n).exists())}')

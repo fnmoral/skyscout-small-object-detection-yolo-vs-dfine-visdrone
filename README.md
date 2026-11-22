@@ -4,6 +4,8 @@
 
 Francis Neil Moral, TensorFlow II course project, Fanshawe College
 
+[![Open the demo in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fnmoral/skyscout-small-object-detection-yolo-vs-dfine-visdrone/blob/main/Demo.ipynb) Try the trained models in your browser: click the badge, then **Runtime > Run all**.
+
 #### What is this project about?
 
 Drones take photos from high up, so people, bikes and cars look tiny. Most object detectors are trained on normal photos where objects are big, so they miss a lot of these tiny things.
@@ -188,7 +190,8 @@ What the pictures show: in the very crowded square both YOLOs hit their 300-box 
 
 | File | What it is |
 |---|---|
-| `SkyScout.ipynb` | The notebook. Run it top to bottom |
+| `SkyScout.ipynb` | The full project notebook (data, training, evaluation, report, demo). Run it top to bottom |
+| `Demo.ipynb` | Demo only: gets the code, downloads the trained models and starts the app |
 | `skyscout.py` | All the code: data, training, evaluation, report, demo, command line |
 | `config.yaml` | Every hyperparameter and setting. Change values here |
 | `requirements.txt` | Python packages |
@@ -287,33 +290,41 @@ Recommended: on the school server, open the demo through an SSH tunnel (`ssh -L 
 
 #### Try the trained models on Google Colab
 
-You do not need the dataset or any training to try the models, only the trained weights in one zip file, `skyscout_models.zip` (YOLO11s, YOLO26s and the fine-tuned D-FINE, about 80 MB). Whoever trained the models makes it with `python skyscout.py pack` (it lands in `downloads/`). If `demo.models_url` in `config.yaml` has a download link, the notebook gets the zip by itself.
+`Demo.ipynb` only runs the demo. It does not need the dataset, Google Drive or any training. It downloads the trained models (YOLO11s, YOLO26s and the fine-tuned D-FINE, about 80 MB) from this repo's [release](https://github.com/fnmoral/skyscout-small-object-detection-yolo-vs-dfine-visdrone/releases/tag/models-v1) and checks the file against the SHA-256 in `config.yaml` before unzipping it.
 
 ```mermaid
 flowchart LR
-    A[Open SkyScout.ipynb<br/>on a Colab GPU] --> B[1. Setup cell<br/>clones repo, installs packages]
-    B --> C[11. Demo cell<br/>unzips models, starts the app]
-    C --> D[Open the public<br/>gradio.live link]
+    A[Open Demo.ipynb<br/>in Colab] --> B[Runtime > Run all]
+    B --> C[Gets code, installs packages,<br/>downloads models]
+    C --> D[App under the cell<br/>+ public gradio.live link]
 ```
 
 **Way 1: Colab in the browser**
 
-1. Upload `skyscout_models.zip` to your Google Drive, for example as `MyDrive/skyscout_models.zip` (skip this if `demo.models_url` is set).
-2. Open `SkyScout.ipynb` in Colab (File > Open notebook > GitHub, paste this repo's link) and choose Runtime > Change runtime type > T4 GPU.
-3. Run **1. Setup**. Allow the Drive access when asked. It clones the repo into `MyDrive/SkyScout` and installs the packages. Recommended: if it says TensorFlow was upgraded, use Runtime > Restart session and run it again.
-4. Go to **11. Demo** and run it. If you uploaded the zip, change the first line to `sk.fetch_models('/content/drive/MyDrive/skyscout_models.zip')`.
-5. Open the app: it shows up right under the cell, and a public link like `https://xxxx.gradio.live` is printed. The link works in any browser tab or on a phone for about a week, or until the Colab session stops.
+1. Click the **Open in Colab** badge at the top of this page (or open `Demo.ipynb` from GitHub in Colab). The notebook asks for a GPU runtime by itself.
+2. Click **Runtime > Run all**. Colab warns that the notebook is not from Google, click **Run anyway**.
+3. Wait a few minutes for the install and the model download.
+4. The app shows up under the last cell, and a link like `https://xxxx.gradio.live` is printed. The link works in any browser tab or on a phone while the Colab session is running.
 
 **Way 2: VS Code connected to a Colab runtime**
 
-1. In VS Code, install the **Google Colab** extension (by Google) and open `SkyScout.ipynb`.
+1. In VS Code, install the **Google Colab** extension (by Google) and open `Demo.ipynb` from your copy of the repo.
 2. Click **Select Kernel** (top right) > **Colab** > **New Colab Server**, pick a **GPU** (T4) and sign in with your Google account. The cells now run on a Colab machine, not on your computer.
-3. In the setup cell, set `USE_DRIVE = False` if Drive cannot be mounted from VS Code. The repo then goes into `/content/SkyScout` for this session only.
-4. Get the models onto the Colab machine: easiest is a download link in `demo.models_url` (or `sk.fetch_models('https://...')`). Recommended: put `skyscout_models.zip` on a GitHub release of your copy of the repo and use that link.
-5. Run **1. Setup**, then **11. Demo**.
-6. Open the printed `https://xxxx.gradio.live` link in your browser. The `http://127.0.0.1:7860` link points to the Colab machine, so it does not open on your computer.
+3. Click **Run All**.
+4. Open the printed `https://xxxx.gradio.live` link in your browser. The `http://127.0.0.1:7860` link points to the Colab machine, so it does not open on your computer.
 
-Stop the app with the stop button of the cell (or Runtime > Interrupt execution). Running the demo cell again closes the old app first.
+Stop the app with the stop button of the cell (or Runtime > Interrupt execution). Running the last cell again closes the old app first.
+
+Recommended: if no free GPU is available, the demo still runs on CPU, only slower (a few seconds per image for D-FINE).
+
+**Using your own trained models.** After training, `python skyscout.py pack` writes `downloads/skyscout_models.zip` and prints its SHA-256 (YOLO checkpoints are cleaned: optimizer, file paths and time zone removed; D-FINE is saved without optimizer state). Put it on a release of your own copy and set `demo.models_url` and `demo.models_sha256` in `config.yaml`, or upload it to Google Drive and run `sk.fetch_models('/content/drive/MyDrive/skyscout_models.zip')` from `SkyScout.ipynb` (section 11) after mounting Drive.
+
+#### Licences and intended use
+
+- The trained models are shared for research and education only.
+- YOLO11s and YOLO26s fine-tuned weights come from Ultralytics models, which are under the [AGPL-3.0 licence](https://www.ultralytics.com/license).
+- D-FINE comes from KerasHub (Apache 2.0).
+- VisDrone2019-DET (also the images and the clip in `samples/`) is for academic, non-commercial use, see the [VisDrone dataset page](https://github.com/VisDrone/VisDrone-Dataset).
 
 #### A note on D-FINE in KerasHub
 
